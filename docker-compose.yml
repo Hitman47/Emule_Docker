@@ -1,0 +1,108 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  aMule ZimaBoard Edition                                    ║
+# ║  Conçu pour fonctionner derrière un stack Gluetun existant ║
+# ╚══════════════════════════════════════════════════════════════╝
+#
+# Les ports sont exposés sur le conteneur Gluetun,
+# pas sur le conteneur aMule (network_mode: service:gluetun).
+
+services:
+
+  # ── VPN (adapte à ta config Gluetun existante) ──
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${NORDVPN_PRIVATE_KEY}
+      - SERVER_COUNTRIES=Netherlands
+      - TZ=Europe/Paris
+    ports:
+      # aMule P2P (à ouvrir sur ta box/routeur)
+      - "4662:4662"       # ED2K TCP
+      - "4665:4665/udp"   # ED2K global search UDP
+      - "4672:4672/udp"   # ED2K UDP
+      # aMule Web UI classique
+      - "4711:4711"
+      # EC (External Connections)
+      - "4712:4712"
+      # Dashboard custom
+      - "8078:8078"
+    volumes:
+      - gluetun-data:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9999/v1/openvpn/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── aMule + Dashboard ──
+  amule:
+    build: .
+    container_name: amule
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+
+      # Mots de passe (utilise un .env !)
+      - GUI_PWD=${AMULE_GUI_PWD:-ChangeMe2025!}
+      - WEBUI_PWD=${AMULE_WEBUI_PWD:-ChangeMe2025!}
+
+      # Dashboard
+      - DASHBOARD_ENABLED=true
+      - DASHBOARD_PORT=8078
+      - DASHBOARD_PWD=${DASHBOARD_PWD:-ChangeMe2025!}
+
+      # Mods originaux
+      - MOD_AUTO_RESTART_ENABLED=true
+      - MOD_AUTO_RESTART_CRON=0 5 * * *
+      - MOD_FIX_KAD_GRAPH_ENABLED=true
+      - MOD_FIX_KAD_BOOTSTRAP_ENABLED=true
+      - MOD_AUTO_SHARE_ENABLED=false
+
+      # Nouvelles features
+      - FILE_ORGANIZER_ENABLED=true
+      - FILE_ORGANIZER_CRON=*/10 * * * *
+      - SERVER_UPDATE_ENABLED=true
+      - SERVER_UPDATE_CRON=0 4 * * *
+      - BACKUP_ENABLED=true
+      - BACKUP_CRON=0 3 * * 0
+      - BACKUP_KEEP=4
+
+      # Limites performance ZimaBoard 832
+      - AMULE_MAX_CONNECTIONS=300
+      - AMULE_MAX_SOURCES_PER_FILE=200
+      - AMULE_MAX_CONN_PER_5SEC=15
+      - AMULE_DOWNLOAD_CAPACITY=300
+      - AMULE_UPLOAD_CAPACITY=80
+
+    volumes:
+      - ./data/amule-config:/home/amule/.aMule
+      - ./data/incoming:/incoming
+      - ./data/temp:/temp
+      - ./data/backups:/backups
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+    restart: unless-stopped
+
+volumes:
+  gluetun-data:

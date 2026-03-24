@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>aMule Dashboard — ZimaBoard</title>
+<style>
+/* ── Reset & Base ── */
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0f1117;--bg2:#1a1b23;--bg3:#22232d;--border:#2a2b35;
+  --text:#e4e4e7;--text2:#a1a1aa;--text3:#71717a;
+  --accent:#6366f1;--accent2:#818cf8;--green:#22c55e;--red:#ef4444;
+  --orange:#f59e0b;--blue:#3b82f6;--purple:#a855f7;--pink:#ec4899;
+  --radius:10px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+a{color:var(--accent2);text-decoration:none}
+
+/* ── Layout ── */
+.app{max-width:1200px;margin:0 auto;padding:12px}
+header{display:flex;align-items:center;justify-content:space-between;padding:16px 0;flex-wrap:wrap;gap:8px}
+header h1{font-size:1.3em;display:flex;align-items:center;gap:8px}
+header h1 span{font-size:.7em;color:var(--text3);font-weight:400}
+.status-pills{display:flex;gap:8px;flex-wrap:wrap}
+.pill{padding:4px 12px;border-radius:20px;font-size:.78em;font-weight:600;
+  display:flex;align-items:center;gap:5px}
+.pill.on{background:rgba(34,197,94,.15);color:var(--green)}
+.pill.off{background:rgba(239,68,68,.15);color:var(--red)}
+.pill.info{background:rgba(99,102,241,.15);color:var(--accent2)}
+
+/* ── Tabs ── */
+.tabs{display:flex;gap:2px;background:var(--bg2);border-radius:var(--radius);padding:3px;
+  margin-bottom:16px;border:1px solid var(--border);overflow-x:auto}
+.tab{padding:8px 18px;border-radius:8px;cursor:pointer;font-size:.88em;font-weight:500;
+  color:var(--text3);white-space:nowrap;transition:.15s}
+.tab:hover{color:var(--text)}
+.tab.active{background:var(--accent);color:#fff}
+.panel{display:none}
+.panel.active{display:block}
+
+/* ── Cards ── */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.card .label{font-size:.78em;color:var(--text3);margin-bottom:4px}
+.card .value{font-size:1.5em;font-weight:700}
+.card .unit{font-size:.6em;color:var(--text2);font-weight:400;margin-left:2px}
+
+/* ── Search ── */
+.search-box{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.search-box input{flex:1;min-width:200px;padding:10px 16px;background:var(--bg2);
+  border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:.95em;outline:none}
+.search-box input:focus{border-color:var(--accent)}
+.search-box select{padding:10px 12px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--radius);color:var(--text);font-size:.88em;outline:none;cursor:pointer}
+.btn{padding:10px 20px;border:none;border-radius:var(--radius);font-size:.9em;
+  font-weight:600;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#4f46e5}
+.btn-sm{padding:6px 12px;font-size:.8em;border-radius:8px}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border)}
+.btn-ghost:hover{background:var(--bg3);color:var(--text)}
+.btn-green{background:rgba(34,197,94,.15);color:var(--green);border:1px solid rgba(34,197,94,.3)}
+.btn-red{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+
+/* ── Tables ── */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 12px;font-size:.78em;color:var(--text3);
+  font-weight:600;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:.88em}
+tr:hover{background:var(--bg3)}
+.fname{max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ── Progress bar ── */
+.pbar{width:100%;height:6px;background:var(--bg);border-radius:3px;overflow:hidden}
+.pbar .fill{height:100%;border-radius:3px;transition:width .3s}
+.pbar .fill.dl{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.pbar .fill.disk{background:var(--green)}
+.pbar .fill.warn{background:var(--orange)}
+.pbar .fill.danger{background:var(--red)}
+
+/* ── Disk gauge ── */
+.disk-card{display:flex;flex-direction:column;gap:8px}
+.disk-bar{margin-top:8px}
+.disk-label{display:flex;justify-content:space-between;font-size:.78em;color:var(--text3)}
+
+/* ── ED2K link input ── */
+.ed2k-box{display:flex;gap:8px;margin-bottom:12px}
+.ed2k-box input{flex:1;padding:10px 16px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--radius);color:var(--text);font-size:.88em;outline:none;font-family:monospace}
+.ed2k-box input:focus{border-color:var(--accent)}
+
+/* ── File categories ── */
+.cat-filters{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.cat-btn{padding:5px 14px;border-radius:20px;font-size:.8em;cursor:pointer;
+  background:var(--bg2);border:1px solid var(--border);color:var(--text2);transition:.15s}
+.cat-btn:hover,.cat-btn.active{border-color:var(--accent);color:var(--accent2);
+  background:rgba(99,102,241,.1)}
+.cat-icon{margin-right:4px}
+
+/* ── Messages ── */
+.msg{padding:12px 16px;border-radius:var(--radius);margin-bottom:12px;font-size:.88em;
+  display:none;align-items:center;gap:8px}
+.msg.show{display:flex}
+.msg.ok{background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.2)}
+.msg.err{background:rgba(239,68,68,.1);color:var(--red);border:1px solid rgba(239,68,68,.2)}
+.msg.info{background:rgba(99,102,241,.1);color:var(--accent2);border:1px solid rgba(99,102,241,.2)}
+
+/* ── Spinner ── */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Loading overlay ── */
+.loading{text-align:center;padding:40px;color:var(--text3)}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:40px;color:var(--text3);font-size:.9em}
+
+/* ── Mobile ── */
+@media(max-width:640px){
+  .app{padding:8px}
+  .cards{grid-template-columns:repeat(2,1fr);gap:8px}
+  .card .value{font-size:1.2em}
+  .fname{max-width:180px}
+  header h1{font-size:1.1em}
+  .tab{padding:7px 12px;font-size:.82em}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ── Header ── -->
+  <header>
+    <h1>🐴 aMule Dashboard <span>ZimaBoard</span></h1>
+    <div class="status-pills" id="statusPills">
+      <div class="pill off" id="pillEd2k">● ED2K</div>
+      <div class="pill off" id="pillKad">● Kad</div>
+      <div class="pill info" id="pillSpeed">↓ — ↑ —</div>
+    </div>
+  </header>
+
+  <!-- ── Navigation ── -->
+  <div class="tabs" id="tabNav">
+    <div class="tab active" data-tab="dashboard">📊 Monitoring</div>
+    <div class="tab" data-tab="search">🔍 Recherche</div>
+    <div class="tab" data-tab="downloads">⬇️ Transferts</div>
+    <div class="tab" data-tab="files">📁 Fichiers</div>
+  </div>
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Dashboard / Monitoring                -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel active" id="panel-dashboard">
+    <div class="cards" id="statsCards">
+      <div class="card">
+        <div class="label">↓ Téléchargement</div>
+        <div class="value" id="dlSpeed">—<span class="unit">KB/s</span></div>
+      </div>
+      <div class="card">
+        <div class="label">↑ Upload</div>
+        <div class="value" id="ulSpeed">—<span class="unit">KB/s</span></div>
+      </div>
+      <div class="card">
+        <div class="label">Transferts actifs</div>
+        <div class="value" id="activeDl">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Fichiers terminés</div>
+        <div class="value" id="totalFiles">—</div>
+      </div>
+    </div>
+
+    <!-- Disk usage -->
+    <div class="cards">
+      <div class="card disk-card">
+        <div class="label">💾 Disque — Incoming</div>
+        <div class="value" id="diskInFree">—<span class="unit">Go libre</span></div>
+        <div class="disk-bar">
+          <div class="pbar"><div class="fill disk" id="diskInBar" style="width:0%"></div></div>
+          <div class="disk-label"><span id="diskInUsed">—</span><span id="diskInTotal">—</span></div>
+        </div>
+      </div>
+      <div class="card disk-card">
+        <div class="label">💾 Disque — Temp</div>
+        <div class="value" id="diskTmpFree">—<span class="unit">Go libre</span></div>
+        <div class="disk-bar">
+          <div class="pbar"><div class="fill disk" id="diskTmpBar" style="width:0%"></div></div>
+          <div class="disk-label"><span id="diskTmpUsed">—</span><span id="diskTmpTotal">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:8px">📡 Détails connexion</div>
+      <pre id="rawStatus" style="font-size:.8em;color:var(--text2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto"></pre>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect')">🔌 Reconnecter</button>
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/organize')">📂 Organiser fichiers</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Search                                -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel" id="panel-search">
+    <div class="search-box">
+      <input type="text" id="searchQuery" placeholder="Rechercher des fichiers sur le réseau ED2K / Kad..."
+       onkeydown="if(event.key==='Enter')doSearch()">
+      <select id="searchType">
+        <option value="kad">Kad</option>
+        <option value="global">Tous serveurs</option>
+        <option value="local">Serveur local</option>
+      </select>
+      <button class="btn btn-primary" onclick="doSearch()">🔍 Chercher</button>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="refreshResults()" style="margin-bottom:12px">
+      🔄 Rafraîchir résultats
+    </button>
+
+    <div id="searchMsg" class="msg info">
+      <div class="spinner"></div> Recherche en cours...
+    </div>
+
+    <div id="searchResults">
+      <div class="empty">Lance une recherche pour trouver des fichiers</div>
+    </div>
+
+    <hr style="border-color:var(--border);margin:24px 0 16px">
+    <h3 style="font-size:.95em;margin-bottom:10px;color:var(--text2)">📎 Ajouter un lien ED2K</h3>
+    <div class="ed2k-box">
+      <input type="text" id="ed2kLink" placeholder="ed2k://|file|...">
+      <button class="btn btn-primary btn-sm" onclick="addEd2k()">Ajouter</button>
+    </div>
+    <div id="ed2kMsg" class="msg"></div>
+  </div>
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Downloads                             -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel" id="panel-downloads">
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="loadDownloads()">🔄 Rafraîchir</button>
+      <button class="btn btn-green btn-sm" onclick="apiCall('/api/resume')">▶ Tout reprendre</button>
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/pause')">⏸ Tout pauser</button>
+    </div>
+    <div id="downloadsTable">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Files                                 -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel" id="panel-files">
+    <div class="cat-filters" id="catFilters">
+      <div class="cat-btn active" data-cat="all" onclick="filterFiles('all',this)">Tous</div>
+      <div class="cat-btn" data-cat="video" onclick="filterFiles('video',this)"><span class="cat-icon">🎬</span>Vidéos</div>
+      <div class="cat-btn" data-cat="music" onclick="filterFiles('music',this)"><span class="cat-icon">🎵</span>Musique</div>
+      <div class="cat-btn" data-cat="image" onclick="filterFiles('image',this)"><span class="cat-icon">🖼</span>Images</div>
+      <div class="cat-btn" data-cat="document" onclick="filterFiles('document',this)"><span class="cat-icon">📄</span>Docs</div>
+      <div class="cat-btn" data-cat="software" onclick="filterFiles('software',this)"><span class="cat-icon">💿</span>Logiciels</div>
+      <div class="cat-btn" data-cat="archive" onclick="filterFiles('archive',this)"><span class="cat-icon">📦</span>Archives</div>
+    </div>
+    <div style="margin-bottom:12px">
+      <input type="text" id="fileSearch" placeholder="Filtrer par nom..."
+       style="padding:8px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+       color:var(--text);font-size:.88em;outline:none;width:100%;max-width:400px"
+       oninput="filterFilesByName(this.value)">
+    </div>
+    <div id="filesTable">
+      <div class="loading"><div class="spinner"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════
+   aMule Dashboard — Client-side Logic
+   ═══════════════════════════════════════════════ */
+
+let allFiles = [];
+let currentCat = 'all';
+let refreshInterval;
+
+// ── Tab navigation ──
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+    // Load data for the tab
+    if (t.dataset.tab === 'downloads') loadDownloads();
+    if (t.dataset.tab === 'files') loadFiles();
+  });
+});
+
+// ── API helpers ──
+async function api(path) {
+  try {
+    const r = await fetch(path);
+    if (r.status === 401) { window.location = '/login'; return null; }
+    return await r.json();
+  } catch(e) { console.error('API error:', e); return null; }
+}
+
+async function apiCall(path) {
+  const d = await api(path);
+  if (d && d.ok) showToast('ok', 'Commande exécutée');
+  else showToast('err', 'Erreur: ' + (d?.error || d?.output || 'inconnu'));
+  return d;
+}
+
+function showToast(type, msg) {
+  // Simple inline toast
+  const el = document.createElement('div');
+  el.className = 'msg show ' + type;
+  el.textContent = msg;
+  el.style.position = 'fixed'; el.style.bottom = '20px'; el.style.right = '20px';
+  el.style.zIndex = '9999'; el.style.maxWidth = '350px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ── Status / Monitoring ──
+async function loadStatus() {
+  const d = await api('/api/status');
+  if (!d) return;
+
+  // Pills
+  const ed2k = document.getElementById('pillEd2k');
+  const kad = document.getElementById('pillKad');
+  ed2k.className = 'pill ' + (d.connected_ed2k ? 'on' : 'off');
+  kad.className = 'pill ' + (d.connected_kad ? 'on' : 'off');
+  document.getElementById('pillSpeed').textContent =
+    '↓ ' + d.download_speed.toFixed(1) + ' ↑ ' + d.upload_speed.toFixed(1) + ' KB/s';
+
+  // Cards
+  document.getElementById('dlSpeed').innerHTML = d.download_speed.toFixed(1) + '<span class="unit">KB/s</span>';
+  document.getElementById('ulSpeed').innerHTML = d.upload_speed.toFixed(1) + '<span class="unit">KB/s</span>';
+
+  // Raw
+  document.getElementById('rawStatus').textContent = d.raw || '(aucune donnée)';
+
+  // Disk
+  if (d.disk) {
+    updateDisk('In', d.disk.incoming);
+    updateDisk('Tmp', d.disk.temp);
+  }
+}
+
+function updateDisk(id, info) {
+  if (!info || info.error) return;
+  document.getElementById('disk' + id + 'Free').innerHTML = info.free_gb + '<span class="unit">Go libre</span>';
+  document.getElementById('disk' + id + 'Used').textContent = info.used_gb + ' Go utilisés';
+  document.getElementById('disk' + id + 'Total').textContent = info.total_gb + ' Go total';
+  const bar = document.getElementById('disk' + id + 'Bar');
+  bar.style.width = info.percent + '%';
+  bar.className = 'fill ' + (info.percent > 90 ? 'danger' : info.percent > 75 ? 'warn' : 'disk');
+}
+
+// ── Downloads ──
+async function loadDownloads() {
+  const d = await api('/api/downloads');
+  const container = document.getElementById('downloadsTable');
+  if (!d || d.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun transfert en cours</div>';
+    document.getElementById('activeDl').textContent = '0';
+    return;
+  }
+  document.getElementById('activeDl').textContent = d.length;
+
+  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>État</th></tr></thead><tbody>';
+  d.forEach(dl => {
+    const statusColor = dl.status === 'downloading' ? 'var(--green)' :
+                        dl.status === 'paused' ? 'var(--orange)' :
+                        dl.status === 'error' ? 'var(--red)' : 'var(--text3)';
+    html += `<tr>
+      <td class="fname" title="${esc(dl.name)}">${esc(dl.name)}</td>
+      <td>${dl.size || '—'}</td>
+      <td style="min-width:120px">
+        <div class="pbar"><div class="fill dl" style="width:${dl.progress}%"></div></div>
+        <span style="font-size:.75em;color:var(--text3)">${dl.progress.toFixed(1)}%</span>
+      </td>
+      <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '—'}</td>
+      <td>${dl.sources || '—'}</td>
+      <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ── Search ──
+async function doSearch() {
+  const q = document.getElementById('searchQuery').value.trim();
+  if (!q) return;
+  const type = document.getElementById('searchType').value;
+  const msg = document.getElementById('searchMsg');
+  msg.className = 'msg info show';
+  msg.innerHTML = '<div class="spinner"></div> Recherche en cours sur le réseau ' + type.toUpperCase() + '...';
+
+  const d = await api('/api/search?q=' + encodeURIComponent(q) + '&type=' + type);
+  msg.classList.remove('show');
+  if (!d) return;
+  renderResults(d.results, d.raw);
+}
+
+async function refreshResults() {
+  const d = await api('/api/results');
+  if (d) renderResults(d.results);
+}
+
+function renderResults(results, raw) {
+  const container = document.getElementById('searchResults');
+  if (!results || results.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun résultat' +
+      (raw ? '<br><pre style="text-align:left;font-size:.75em;color:var(--text3);margin-top:8px;max-height:150px;overflow:auto">' + esc(raw) + '</pre>' : '') +
+      '</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>#</th><th>Nom</th><th>Taille</th><th>Sources</th><th></th></tr></thead><tbody>';
+  results.forEach(r => {
+    html += `<tr>
+      <td>${r.id}</td>
+      <td class="fname" title="${esc(r.name)}">${esc(r.name)}</td>
+      <td>${r.size || '—'}</td>
+      <td>${r.sources || '—'}</td>
+      <td><button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id})">⬇️</button></td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function downloadResult(id) {
+  const d = await api('/api/download?id=' + id);
+  if (d && d.ok) showToast('ok', 'Téléchargement ajouté !');
+  else showToast('err', 'Erreur ajout');
+}
+
+// ── ED2K Links ──
+async function addEd2k() {
+  const link = document.getElementById('ed2kLink').value.trim();
+  const msg = document.getElementById('ed2kMsg');
+  if (!link.startsWith('ed2k://')) {
+    msg.className = 'msg err show'; msg.textContent = 'Le lien doit commencer par ed2k://';
+    return;
+  }
+  try {
+    const r = await fetch('/api/add_ed2k', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({link})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      msg.className = 'msg ok show'; msg.textContent = 'Lien ajouté !';
+      document.getElementById('ed2kLink').value = '';
+    } else {
+      msg.className = 'msg err show'; msg.textContent = d.error || 'Erreur';
+    }
+  } catch(e) {
+    msg.className = 'msg err show'; msg.textContent = 'Erreur réseau';
+  }
+  setTimeout(() => msg.classList.remove('show'), 3000);
+}
+
+// ── Files ──
+async function loadFiles() {
+  const d = await api('/api/files');
+  const container = document.getElementById('filesTable');
+  if (!d || d.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun fichier terminé</div>';
+    document.getElementById('totalFiles').textContent = '0';
+    return;
+  }
+  allFiles = d;
+  document.getElementById('totalFiles').textContent = d.length;
+  renderFiles(d);
+}
+
+function renderFiles(files) {
+  const container = document.getElementById('filesTable');
+  if (files.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun fichier dans cette catégorie</div>';
+    return;
+  }
+  const catIcons = {video:'🎬',music:'🎵',image:'🖼',document:'📄',software:'💿',archive:'📦',other:'📎'};
+  let html = '<table><thead><tr><th></th><th>Nom</th><th>Taille</th><th>Dossier</th><th>Date</th></tr></thead><tbody>';
+  files.forEach(f => {
+    const icon = catIcons[f.category] || '📎';
+    const dir = f.path.includes('/') ? f.path.split('/').slice(0, -1).join('/') : '—';
+    const date = new Date(f.modified * 1000).toLocaleDateString('fr-FR');
+    html += `<tr>
+      <td>${icon}</td>
+      <td class="fname" title="${esc(f.name)}">${esc(f.name)}</td>
+      <td style="white-space:nowrap">${f.size_human}</td>
+      <td style="color:var(--text3);font-size:.82em">${esc(dir)}</td>
+      <td style="white-space:nowrap;color:var(--text3);font-size:.82em">${date}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function filterFiles(cat, el) {
+  currentCat = cat;
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+  if (el) el.classList.add('active');
+  const nameFilter = document.getElementById('fileSearch').value.toLowerCase();
+  let filtered = allFiles;
+  if (cat !== 'all') filtered = filtered.filter(f => f.category === cat);
+  if (nameFilter) filtered = filtered.filter(f => f.name.toLowerCase().includes(nameFilter));
+  renderFiles(filtered);
+}
+
+function filterFilesByName(val) {
+  filterFiles(currentCat, document.querySelector('.cat-btn[data-cat="'+currentCat+'"]'));
+}
+
+// ── Utils ──
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Init & Auto-refresh ──
+async function init() {
+  await loadStatus();
+  await loadDownloads();
+  await loadFiles();
+
+  // Auto-refresh every 5 seconds
+  refreshInterval = setInterval(async () => {
+    await loadStatus();
+    // Only refresh downloads if tab is active
+    if (document.getElementById('panel-downloads').classList.contains('active')) {
+      await loadDownloads();
+    }
+  }, 5000);
+}
+
+init();
+</script>
+</body>
+</html>
