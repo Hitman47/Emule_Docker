@@ -320,6 +320,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/" or path == "/index.html":
             self.serve_file(STATIC_DIR / "index.html", "text/html")
 
+        elif path == "/manifest.json":
+            self.serve_file(STATIC_DIR / "manifest.json", "application/manifest+json")
+
         else:
             self.send_response(404); self.end_headers()
 
