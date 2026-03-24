@@ -8,7 +8,7 @@ Version sur mesure d'aMule en Docker, optimisée pour **ZimaBoard 832** sous Zim
 - aMule avec Web UI Reloaded
 - Auto-restart programmable (fix memory leak)
 - Auto-share de répertoires
-- Fix Kad graph crash
+- Fix Kad graph crash 
 - Bootstrap Kad automatique
 
 ### Nouvelles fonctionnalités
