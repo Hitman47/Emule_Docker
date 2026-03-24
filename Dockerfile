@@ -23,7 +23,7 @@ LABEL description="aMule for ZimaOS - Dashboard, Search, Auto-Organize"
 RUN apk add --no-cache \
     libedit libgcc libintl libpng libstdc++ libupnp musl wxwidgets zlib \
     tzdata pwgen mandoc curl \
-    python3 py3-pip py3-flask \
+    python3 \
     inotify-tools jq \
     && apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing crypto++
 
@@ -37,18 +37,13 @@ COPY --from=builder /usr/share/man/man1/alcc.1.gz /usr/share/man/man1/amulecmd.1
 # Verify binaries link correctly
 RUN ldd /usr/bin/amuled && ldd /usr/bin/amulecmd && ldd /usr/bin/amuleweb
 
-# Install Python dashboard deps
-COPY dashboard/requirements.txt /opt/dashboard/requirements.txt
-RUN pip install --no-cache-dir --break-system-packages -r /opt/dashboard/requirements.txt
-
 # Copy application files
 COPY dashboard/ /opt/dashboard/
 COPY scripts/ /opt/scripts/
 RUN chmod +x /opt/scripts/*.sh
 
 COPY entrypoint.sh /home/amule/entrypoint.sh
-COPY healthcheck.sh /home/amule/healthcheck.sh
-RUN chmod +x /home/amule/entrypoint.sh /home/amule/healthcheck.sh
+RUN chmod +x /home/amule/entrypoint.sh
 
 WORKDIR /home/amule
 
@@ -58,6 +53,6 @@ EXPOSE 4711/tcp 4712/tcp 4662/tcp 4665/udp 4672/udp
 EXPOSE 8078/tcp
 
 HEALTHCHECK --interval=120s --timeout=15s --start-period=60s --retries=3 \
-    CMD /home/amule/healthcheck.sh
+    CMD /opt/scripts/healthcheck.sh
 
 ENTRYPOINT ["/home/amule/entrypoint.sh"]

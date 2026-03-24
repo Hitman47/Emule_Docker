@@ -148,20 +148,25 @@ mod_backup() {
 }
 
 # ═══════════════════════════════════════════
-# NEW: Dashboard (Flask app)
+# NEW: Dashboard (HTTP stdlib app)
 # ═══════════════════════════════════════════
 start_dashboard() {
     DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-"false"}
     DASHBOARD_PORT=${DASHBOARD_PORT:-8078}
     if [ "${DASHBOARD_ENABLED}" = "true" ]; then
         printf "[DASHBOARD] Démarrage du dashboard sur le port %s...\n" "$DASHBOARD_PORT"
-        export AMULE_HOME AMULE_INCOMING AMULE_TEMP
-        export EC_HOST="127.0.0.1"
-        export EC_PORT="4712"
-        export EC_PASSWORD="${GUI_PWD}"
-        export FLASK_PORT="${DASHBOARD_PORT}"
-        export DASHBOARD_PASSWORD="${DASHBOARD_PWD:-${WEBUI_PWD}}"
-        python3 /opt/dashboard/app.py &
+        export AMULE_HOME
+        export INCOMING_DIR="${AMULE_INCOMING}"
+        export TEMP_DIR="${AMULE_TEMP}"
+        export AMULE_EC_HOST="127.0.0.1"
+        export AMULE_EC_PORT="4712"
+        export AMULE_EC_PASSWORD="${AMULE_GUI_PWD}"
+        export EC_HOST="${AMULE_EC_HOST}"
+        export EC_PORT="${AMULE_EC_PORT}"
+        export EC_PASSWORD="${AMULE_EC_PASSWORD}"
+        export DASHBOARD_PORT
+        export DASHBOARD_PWD="${DASHBOARD_PWD:-${AMULE_WEBUI_PWD}}"
+        python3 /opt/dashboard/server.py &
         DASHBOARD_PID=$!
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
     fi

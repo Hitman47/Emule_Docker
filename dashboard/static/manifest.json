@@ -1,17 +1,25 @@
 {
-  "name": "aMule Dashboard — ZimaBoard Edition",
-  "short_name": "aMule Dashboard",
-  "description": "Dashboard léger pour aMule sur ZimaBoard : monitoring, recherche ED2K/Kad, transferts et fichiers.",
-  "lang": "fr-FR",
+  "name": "aMule Dashboard — ZimaBoard",
+  "short_name": "aMule",
+  "description": "Dashboard léger pour piloter aMule sur ZimaBoard.",
+  "lang": "fr",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "any",
   "background_color": "#0f1117",
   "theme_color": "#6366f1",
-  "categories": [
-    "utilities",
-    "productivity",
-    "network"
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
   ]
 }

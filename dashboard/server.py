@@ -14,14 +14,15 @@ import time
 import re
 import hashlib
 import threading
+import mimetypes
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 
 # ── Config ──
-EC_HOST = "localhost"
-EC_PORT = os.environ.get("AMULE_EC_PORT", "4712")
-EC_PASSWORD = os.environ.get("AMULE_EC_PASSWORD", "")
-DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "4713"))
+EC_HOST = os.environ.get("AMULE_EC_HOST", os.environ.get("EC_HOST", "localhost"))
+EC_PORT = os.environ.get("AMULE_EC_PORT", os.environ.get("EC_PORT", "4712"))
+EC_PASSWORD = os.environ.get("AMULE_EC_PASSWORD", os.environ.get("EC_PASSWORD", ""))
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8078"))
 DASHBOARD_PWD = os.environ.get("DASHBOARD_PWD", "admin")
 INCOMING_DIR = os.environ.get("INCOMING_DIR", "/incoming")
 TEMP_DIR = os.environ.get("TEMP_DIR", "/temp")
@@ -312,16 +313,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/organize":
             try:
-                subprocess.run(["/home/amule/scripts/file-organizer.sh"], capture_output=True, timeout=30)
+                subprocess.run(["/opt/scripts/file-organizer.sh"], capture_output=True, timeout=30)
                 self.send_json({"ok": True})
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
 
         elif path == "/" or path == "/index.html":
-            self.serve_file(STATIC_DIR / "index.html", "text/html")
+            self.serve_static("index.html")
 
         elif path == "/manifest.json":
-            self.serve_file(STATIC_DIR / "manifest.json", "application/manifest+json")
+            self.serve_static("manifest.json")
+
+        elif path == "/apple-touch-icon.png":
+            self.serve_static("icons/apple-touch-icon.png")
+
+        elif path == "/favicon-32x32.png":
+            self.serve_static("icons/favicon-32x32.png")
+
+        elif path == "/favicon.ico":
+            self.serve_static("icons/favicon.ico")
+
+        elif path.startswith("/icons/"):
+            self.serve_static(path.lstrip("/"))
 
         else:
             self.send_response(404); self.end_headers()
@@ -343,16 +356,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "JSON invalide"}, 400)
         else: self.send_json({"error": "not found"}, 404)
 
-    def serve_file(self, filepath, ctype):
+    def serve_file(self, filepath, ctype=None):
         try:
-            content = open(filepath, 'rb').read()
+            content = Path(filepath).read_bytes()
+            guessed_type = ctype or mimetypes.guess_type(str(filepath))[0] or 'application/octet-stream'
             self.send_response(200)
-            self.send_header('Content-Type', f'{ctype}; charset=utf-8')
+            if guessed_type.startswith('text/') or guessed_type in {'application/json', 'application/manifest+json', 'application/javascript', 'image/svg+xml'}:
+                self.send_header('Content-Type', f'{guessed_type}; charset=utf-8')
+            else:
+                self.send_header('Content-Type', guessed_type)
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
         except FileNotFoundError:
             self.send_response(404); self.end_headers()
+
+    def serve_static(self, relative_path):
+        target = (STATIC_DIR / relative_path).resolve()
+        static_root = STATIC_DIR.resolve()
+        if static_root not in target.parents and target != static_root:
+            self.send_response(403)
+            self.end_headers()
+            return
+        self.serve_file(target)
 
     def serve_login(self):
         html = b"""<!DOCTYPE html>
