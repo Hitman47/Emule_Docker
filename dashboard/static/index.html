@@ -362,8 +362,8 @@ tr:hover{background:var(--bg3)}
   <div class="panel" id="panel-downloads">
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="loadDownloads()">🔄 Rafraîchir</button>
-      <button class="btn btn-green btn-sm" onclick="apiCall('/api/resume')">▶ Tout reprendre</button>
-      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/pause')">⏸ Tout pauser</button>
+      <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)">▶ Tout reprendre</button>
+      <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)">⏸ Tout pauser</button>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
     </div>
     <div id="downloadsTable">
@@ -570,18 +570,45 @@ document.querySelectorAll('.tab').forEach(t => {
 });
 
 // ── API helpers ──
-async function api(path) {
+async function api(path, options = {}) {
   try {
-    const r = await fetch(path);
+    const r = await fetch(path, options);
     if (r.status === 401) { window.location = '/login'; return null; }
-    return await r.json();
+    const data = await r.json();
+    data.__httpStatus = r.status;
+    return data;
   } catch(e) { console.error('API error:', e); return null; }
 }
 
-async function apiCall(path) {
+function getActionMessage(d, fallback = 'Erreur inconnue') {
+  return d?.message || d?.error || d?.output || fallback;
+}
+
+function setButtonPending(btn, pending, pendingText = '...') {
+  if (!btn) return;
+  if (pending) {
+    if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.dataset.busy = '1';
+    btn.innerHTML = `<span class="spinner"></span> ${pendingText}`;
+  } else {
+    btn.disabled = false;
+    btn.dataset.busy = '0';
+    if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
+  }
+}
+
+async function apiCall(path, opts = {}) {
+  const {button = null, pendingText = 'Action...', successRefresh = null} = opts;
+  setButtonPending(button, true, pendingText);
   const d = await api(path);
-  if (d && d.ok) showToast('ok', 'Commande exécutée');
-  else showToast('err', 'Erreur: ' + (d?.error || d?.output || 'inconnu'));
+  setButtonPending(button, false);
+  if (d && d.ok) {
+    showToast('ok', getActionMessage(d, 'Commande exécutée'));
+    if (typeof successRefresh === 'function') await successRefresh();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur inconnue'));
+  }
   return d;
 }
 
@@ -764,7 +791,7 @@ async function loadDownloads() {
   badge.textContent = d.length;
   dlTab.appendChild(badge);
 
-  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th><th></th></tr></thead><tbody>';
   d.forEach(dl => {
     const statusColor = dl.status === 'downloading' ? 'var(--green)' :
                         dl.status === 'paused' || dl.status === 'stopped' ? 'var(--orange)' :
@@ -797,6 +824,12 @@ async function loadDownloads() {
       <td>${dl.sources || '\u2014'}</td>
       <td style="font-size:.82em;color:var(--text2)">${eta}</td>
       <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
+      <td style="white-space:nowrap">
+        ${dl.status === 'paused' || dl.status === 'stopped'
+          ? `<button class="btn btn-green btn-sm" onclick="handleTransferAction('resume','${dl.hash}', this)" title="Reprendre">▶</button>`
+          : `<button class="btn btn-ghost btn-sm" onclick="handleTransferAction('pause','${dl.hash}', this)" title="Pause">⏸</button>`}
+        <button class="btn btn-red btn-sm" onclick="handleTransferAction('cancel','${dl.hash}', this)" title="Supprimer" style="margin-left:2px">✕</button>
+      </td>
     </tr>`;
   });
   html += '</tbody></table>';
@@ -841,7 +874,7 @@ function renderResults(results, raw) {
       <td>${r.size || '\u2014'}</td>
       <td>${r.sources || '\u2014'}</td>
       <td style="white-space:nowrap">
-        <button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id})" title="Télécharger">⬇️</button>
+        <button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id}, this)" title="Télécharger">⬇️</button>
         <button class="btn btn-ghost btn-sm" onclick="saveFavorite(${r.id})" title="Favori" style="margin-left:2px">⭐</button>
       </td>
     </tr>`;
@@ -850,14 +883,37 @@ function renderResults(results, raw) {
   container.innerHTML = html;
 }
 
-async function downloadResult(id) {
-  const d = await api('/api/download?id=' + id);
-  if (d && d.ok) {
-    showToast('ok', d.message || 'Téléchargement ajouté');
-    loadDownloads();
-  } else {
-    showToast('err', d?.error || d?.message || d?.output || 'Erreur ajout');
-  }
+async function downloadResult(id, btn = null) {
+  const d = await apiCall('/api/download?id=' + id, {
+    button: btn,
+    pendingText: 'Ajout...',
+    successRefresh: loadDownloads,
+  });
+  return d;
+}
+
+async function handleTransferAction(action, hash, btn = null) {
+  const endpoint = action === 'cancel' ? '/api/cancel?hash=' : '/api/' + action + '?hash=';
+  const labels = {
+    pause: 'Pause...',
+    resume: 'Reprise...',
+    cancel: 'Suppression...',
+  };
+  const d = await apiCall(endpoint + encodeURIComponent(hash), {
+    button: btn,
+    pendingText: labels[action] || 'Action...',
+    successRefresh: loadDownloads,
+  });
+  return d;
+}
+
+async function handleBulkTransferAction(action, btn = null) {
+  const d = await apiCall('/api/' + action, {
+    button: btn,
+    pendingText: action === 'pause' ? 'Pause...' : 'Reprise...',
+    successRefresh: loadDownloads,
+  });
+  return d;
 }
 
 // ── Favorites ──
@@ -1045,29 +1101,29 @@ async function loadBookmarklet() {
 
 // ── ED2K Links ──
 async function addEd2k() {
-  const link = document.getElementById('ed2kLink').value.trim();
+  const input = document.getElementById('ed2kLink');
+  const link = input.value.trim();
   const msg = document.getElementById('ed2kMsg');
+  const btn = document.querySelector('.ed2k-box .btn');
   if (!link.startsWith('ed2k://')) {
     msg.className = 'msg err show'; msg.textContent = 'Le lien doit commencer par ed2k://';
     return;
   }
-  try {
-    const r = await fetch('/api/add_ed2k', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({link})
-    });
-    const d = await r.json();
-    if (d.ok) {
-      msg.className = 'msg ok show'; msg.textContent = 'Lien ajouté !';
-      document.getElementById('ed2kLink').value = '';
-    } else {
-      msg.className = 'msg err show'; msg.textContent = d.error || 'Erreur';
-    }
-  } catch(e) {
-    msg.className = 'msg err show'; msg.textContent = 'Erreur réseau';
+  setButtonPending(btn, true, 'Ajout...');
+  const d = await api('/api/add_ed2k', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({link})
+  });
+  setButtonPending(btn, false);
+  if (d && d.ok) {
+    msg.className = 'msg ok show'; msg.textContent = getActionMessage(d, 'Lien ajouté');
+    input.value = '';
+    await loadDownloads();
+  } else {
+    msg.className = 'msg err show'; msg.textContent = getActionMessage(d, 'Erreur réseau');
   }
-  setTimeout(() => msg.classList.remove('show'), 3000);
+  setTimeout(() => msg.classList.remove('show'), 3500);
 }
 
 // ── Servers ──
