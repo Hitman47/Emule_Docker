@@ -91,20 +91,81 @@ DEFAULT_SERVER_SOURCES = {
 }
 
 
+
+DEFAULT_DASHBOARD_CONFIG = {
+    "read_only": False,
+    "debug_mode": True,
+    "refresh_interval_sec": 5,
+    "action_history_limit": 80,
+    "write_rate_limit_per_minute": 30,
+    "login_rate_limit_per_minute": 20,
+}
+
+
+def _default_settings():
+    return {
+        "server_sources": [dict(v) for v in DEFAULT_SERVER_SOURCES.values()],
+        "last_scan": None,
+        "dashboard": dict(DEFAULT_DASHBOARD_CONFIG),
+    }
+
+
+def normalize_dashboard_config(raw=None):
+    raw = raw or {}
+    cfg = dict(DEFAULT_DASHBOARD_CONFIG)
+    if isinstance(raw, dict):
+        for key in list(cfg.keys()):
+            if key in raw:
+                cfg[key] = raw.get(key)
+    cfg["read_only"] = bool(cfg.get("read_only", False))
+    cfg["debug_mode"] = bool(cfg.get("debug_mode", True))
+    limits = (
+        ("refresh_interval_sec", 2, 60, 5),
+        ("action_history_limit", 10, 300, 80),
+        ("write_rate_limit_per_minute", 5, 300, 30),
+        ("login_rate_limit_per_minute", 3, 120, 20),
+    )
+    for key, minimum, maximum, default in limits:
+        try:
+            value = int(cfg.get(key, default))
+        except Exception:
+            value = default
+        cfg[key] = max(minimum, min(maximum, value))
+    return cfg
+
+
+def normalize_settings(raw=None):
+    raw = raw if isinstance(raw, dict) else {}
+    settings = _default_settings()
+    if isinstance(raw.get("last_scan"), str):
+        settings["last_scan"] = raw.get("last_scan")
+    sources = raw.get("server_sources")
+    if isinstance(sources, list) and sources:
+        settings["server_sources"] = sources
+    settings["dashboard"] = normalize_dashboard_config(raw.get("dashboard"))
+    return settings
+
+
+def get_dashboard_config():
+    return normalize_settings(load_settings()).get("dashboard", dict(DEFAULT_DASHBOARD_CONFIG))
+
+
 def load_settings():
     """Load persistent settings from JSON file."""
     try:
         with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
+            return normalize_settings(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return None
+        return normalize_settings(None)
 
 
 def save_settings(settings):
     """Save settings to JSON file."""
     try:
+        normalized = normalize_settings(settings)
         with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
+            json.dump(normalized, f, indent=2, ensure_ascii=False)
+        sync_action_history_limit(normalized.get("dashboard", {}))
         return True
     except Exception:
         return False
@@ -158,10 +219,59 @@ def cache_clear(*keys):
 _action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel")}
 _last_search_context = {"query": "", "type": "kad", "results": [], "timestamp": 0}
 
+
 # Recent action history for UI / diagnostics
 import collections
-_action_history = collections.deque(maxlen=80)
+_action_history = collections.deque(maxlen=DEFAULT_DASHBOARD_CONFIG["action_history_limit"])
 _action_history_lock = threading.Lock()
+
+# Lightweight rate limiting
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = {}
+
+
+def get_client_ip(handler):
+    forwarded = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    try:
+        return handler.client_address[0]
+    except Exception:
+        return "unknown"
+
+
+def rate_limit_retry_after(bucket, key, limit, window=60):
+    now = time.time()
+    scope = f"{bucket}:{key}"
+    with _rate_limit_lock:
+        dq = _rate_limit_buckets.get(scope)
+        if dq is None:
+            dq = collections.deque()
+            _rate_limit_buckets[scope] = dq
+        while dq and now - dq[0] >= window:
+            dq.popleft()
+        if len(dq) >= max(1, int(limit)):
+            return max(1, int(window - (now - dq[0])))
+        dq.append(now)
+    return 0
+
+
+def sync_action_history_limit(config=None):
+    cfg = normalize_dashboard_config(config or get_dashboard_config())
+    limit = int(cfg.get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"]))
+    global _action_history
+    with _action_history_lock:
+        items = list(_action_history)[:limit]
+        _action_history = collections.deque(items, maxlen=limit)
+
+
+def clear_action_history_store():
+    global _action_history
+    with _action_history_lock:
+        _action_history = collections.deque([], maxlen=_action_history.maxlen)
+    history = _load_history()
+    history["action_history"] = []
+    _save_history(history)
 
 
 def set_last_search_context(query, search_type, results):
@@ -184,6 +294,7 @@ def action_response(action, ok, code, message, confirmed=False, status=None, dat
         "data": data or {},
     }
     return payload, (status or (200 if ok else 409))
+
 
 
 def record_action_event(payload, http_status):
@@ -211,6 +322,10 @@ def record_action_event(payload, http_status):
             event["target"] = data["query"]
     with _action_history_lock:
         _action_history.appendleft(event)
+        snapshot = list(_action_history)
+    history = _load_history()
+    history["action_history"] = snapshot
+    _save_history(history)
 
 
 def get_action_history(limit=30):
@@ -936,20 +1051,24 @@ MAX_SEARCH_HISTORY = 50
 MAX_FAVORITES = 200
 MAX_SAVED_SEARCHES = 40
 
+
 def _normalize_history_shape(data):
     if not isinstance(data, dict):
         data = {}
     data.setdefault("searches", [])
     data.setdefault("favorites", [])
     data.setdefault("saved_searches", [])
+    data.setdefault("action_history", [])
     return data
+
 
 def _load_history():
     try:
         with open(HISTORY_FILE, "r") as f:
             return _normalize_history_shape(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"searches": [], "favorites": [], "saved_searches": []}
+        return {"searches": [], "favorites": [], "saved_searches": [], "action_history": []}
+
 
 def _save_history(data):
     try:
@@ -958,6 +1077,19 @@ def _save_history(data):
         return True
     except Exception:
         return False
+
+
+def init_action_history_store():
+    global _action_history
+    history = _load_history()
+    limit = get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"])
+    events = [e for e in history.get("action_history", []) if isinstance(e, dict)][:limit]
+    with _action_history_lock:
+        _action_history = collections.deque(events, maxlen=limit)
+
+
+init_action_history_store()
+
 
 def add_search_history(query, search_type, result_count):
     h = _load_history()
@@ -1528,7 +1660,11 @@ def build_debug_snapshot():
         "age_seconds": search_age,
     }
     diag["recent_actions"] = get_action_history(12)
-    diag["recent_logs"] = list(_log_buffer)[-15:]
+    diag["dashboard_config"] = get_dashboard_config()
+    if get_dashboard_config().get("debug_mode", True):
+        diag["recent_logs"] = list(_log_buffer)[-15:]
+    else:
+        diag["recent_logs"] = ["Mode debug étendu désactivé"]
     return diag
 
 
@@ -1540,6 +1676,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', len(body))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(body)
 
@@ -1558,15 +1696,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.serve_login(); return
 
         if path == "/api/login":
+            cfg = get_dashboard_config()
+            retry_after = rate_limit_retry_after("login", get_client_ip(self), cfg.get("login_rate_limit_per_minute", 20), 60)
+            if retry_after:
+                self.send_json({"ok": False, "error": f"Trop de tentatives. Réessaie dans {retry_after}s.", "retry_after": retry_after}, 429)
+                return
             pwd = qs.get("password", [""])[0]
             if pwd == DASHBOARD_PWD:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Set-Cookie', f'token={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Strict')
+                self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True, "token": AUTH_TOKEN}).encode())
             else:
                 self.send_json({"ok": False, "error": "Mot de passe incorrect"}, 401)
+            return
+
+        if path == "/api/logout":
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True}).encode())
             return
 
         if not self.check_auth():
@@ -1639,6 +1792,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"results": parse_search_results(raw)})
 
         elif path == "/api/download":
+            blocked = guard_write_action(self, "download")
+            if blocked:
+                self.send_json(*blocked)
+                return
             num = qs.get("id", [""])[0]
             if not num.isdigit():
                 payload, status = action_response("download", False, "INVALID_INPUT", normalize_action_error("download", "INVALID_INPUT"), status=400)
@@ -1647,6 +1804,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(payload, status)
 
         elif path == "/api/add_ed2k":
+            blocked = guard_write_action(self, "add_ed2k")
+            if blocked:
+                self.send_json(*blocked)
+                return
             link = qs.get("link", [""])[0]
             payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link))
             self.send_json(payload, status)
@@ -1662,16 +1823,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(get_disk_info())
 
         elif path == "/api/pause":
+            blocked = guard_write_action(self, "pause")
+            if blocked:
+                self.send_json(*blocked)
+                return
             h = qs.get("hash", [""])[0]
             payload, status = execute_locked_action("pause", lambda: change_transfer_state("pause", h))
             self.send_json(payload, status)
 
         elif path == "/api/resume":
+            blocked = guard_write_action(self, "resume")
+            if blocked:
+                self.send_json(*blocked)
+                return
             h = qs.get("hash", [""])[0]
             payload, status = execute_locked_action("resume", lambda: change_transfer_state("resume", h))
             self.send_json(payload, status)
 
         elif path == "/api/cancel":
+            blocked = guard_write_action(self, "cancel")
+            if blocked:
+                self.send_json(*blocked)
+                return
             h = qs.get("hash", [""])[0]
             if not h:
                 payload, status = action_response("cancel", False, "INVALID_INPUT", "Hash requis.", status=400)
@@ -1680,6 +1853,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(payload, status)
 
         elif path == "/api/connect":
+            blocked = guard_write_action(self, "connect")
+            if blocked:
+                self.send_json(*blocked)
+                return
             target = qs.get("target", ["all"])[0]  # all, ed2k, kad
             results = {}
 
@@ -1747,12 +1924,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/action_history":
             limit = int(qs.get("limit", ["30"])[0] or "30")
-            self.send_json({"actions": get_action_history(limit)})
+            self.send_json({"actions": get_action_history(limit), "limit": _action_history.maxlen})
+
+        elif path == "/api/app_config":
+            self.send_json({"ok": True, "config": get_dashboard_config(), "read_only": is_read_only_enabled()})
 
         elif path == "/api/debug":
             self.send_json(build_debug_snapshot())
 
         elif path == "/api/organize":
+            blocked = guard_write_action(self, "organize")
+            if blocked:
+                self.send_json(*blocked)
+                return
             try:
                 subprocess.run(["/opt/scripts/file-organizer.sh"], capture_output=True, timeout=30)
                 cache_clear("files")
@@ -1762,10 +1946,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/settings":
             settings = load_settings()
-            if settings:
-                self.send_json({"ok": True, "settings": settings})
-            else:
-                self.send_json({"ok": False, "error": "Fichier settings introuvable"}, 404)
+            self.send_json({"ok": True, "settings": settings, "dashboard": settings.get("dashboard", {})})
 
         elif path == "/api/kad/status":
             raw = run_amulecmd("status")
@@ -1774,12 +1955,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"kad_connected": kad_ok, "ed2k_connected": ed2k_ok, "raw": raw})
 
         elif path == "/api/kad/reconnect":
+            blocked = guard_write_action(self, "reconnect")
+            if blocked:
+                self.send_json(*blocked)
+                return
             out1 = run_amulecmd("connect kad")
             out2 = run_amulecmd("connect ed2k")
             cache_clear("status")
             self.send_json({"ok": True, "output": out1 + "\n" + out2})
 
         elif path == "/api/scan_now":
+            blocked = guard_write_action(self, "scan_now")
+            if blocked:
+                self.send_json(*blocked)
+                return
             # Trigger an immediate source scan
             def do_scan():
                 try:
@@ -1791,6 +1980,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True, "message": "Scan lancé en arrière-plan"})
 
         elif path == "/api/logs":
+            if not get_dashboard_config().get("debug_mode", True):
+                self.send_json({"ok": False, "error": "Mode debug désactivé"}, 403)
+                return
             log_name = qs.get("name", [""])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
@@ -1857,6 +2049,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "JSON invalide"}, 400)
             return
 
+        if parsed.path == "/api/action_history/clear":
+            clear_action_history_store()
+            self.send_json({"ok": True, "message": "Historique des actions vidé."})
+            return
+
+        if parsed.path == "/api/logout":
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True}).encode())
+            return
+
+        if parsed.path == "/api/dashboard_config":
+            settings = load_settings()
+            settings["dashboard"] = normalize_dashboard_config(data)
+            if save_settings(settings):
+                self.send_json({"ok": True, "config": settings["dashboard"]})
+            else:
+                self.send_json({"ok": False, "error": "Impossible de sauvegarder la configuration"}, 500)
+            return
+
+        blocked = guard_write_action(self, parsed.path.rsplit('/', 1)[-1])
+        if blocked:
+            self.send_json(*blocked)
+            return
+
         if parsed.path == "/api/add_ed2k":
             link_blob = str(data.get("link") or data.get("text") or "")
             payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
@@ -1874,19 +2093,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == "/api/settings":
             # Save settings
             global SERVER_SOURCES
-            new_settings = data
+            new_settings = normalize_settings(data)
             if save_settings(new_settings):
                 SERVER_SOURCES = get_server_sources_from_settings()
-                self.send_json({"ok": True})
+                self.send_json({"ok": True, "settings": new_settings})
             else:
                 self.send_json({"error": "Impossible de sauvegarder"}, 500)
 
         elif parsed.path == "/api/settings/add_source":
             # Add a new server source
             settings = load_settings()
-            if not settings:
-                self.send_json({"error": "Settings introuvable"}, 500)
-                return
             new_src = {
                 "key": data.get("key", f"custom_{int(time.time())}"),
                 "label": data.get("label", data.get("url", "Custom")),
@@ -1915,9 +2131,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/settings/remove_source":
             settings = load_settings()
-            if not settings:
-                self.send_json({"error": "Settings introuvable"}, 500)
-                return
             key = data.get("key", "")
             url = data.get("url", "")
             before = len(settings.get("server_sources", []))
@@ -1934,9 +2147,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/settings/toggle_source":
             settings = load_settings()
-            if not settings:
-                self.send_json({"error": "Settings introuvable"}, 500)
-                return
             key = data.get("key", "")
             toggled = False
             for s in settings.get("server_sources", []):

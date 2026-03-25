@@ -558,6 +558,44 @@ tr:hover{background:var(--bg3)}
       </div>
     </div>
 
+    <!-- Dashboard mode / safety -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🛡️ Mode dashboard & sécurité</div>
+      <div id="appModeSummary" style="font-size:.84em;color:var(--text2);margin-bottom:12px">Chargement...</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px">
+        <label style="display:flex;align-items:center;gap:8px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <input type="checkbox" id="cfgReadOnly">
+          <span>Mode lecture seule</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <input type="checkbox" id="cfgDebugMode">
+          <span>Debug étendu</span>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <span style="font-size:.78em;color:var(--text3)">Refresh auto (sec)</span>
+          <input id="cfgRefreshInterval" type="number" min="2" max="60" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <span style="font-size:.78em;color:var(--text3)">Historique actions</span>
+          <input id="cfgHistoryLimit" type="number" min="10" max="300" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <span style="font-size:.78em;color:var(--text3)">Rate limit actions/min</span>
+          <input id="cfgWriteRate" type="number" min="5" max="300" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <span style="font-size:.78em;color:var(--text3)">Rate limit login/min</span>
+          <input id="cfgLoginRate" type="number" min="3" max="120" style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text)">
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="saveAppConfig(this)">💾 Sauver</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadAppConfig()">🔄 Recharger</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearActionHistory()">🧹 Vider l'historique</button>
+        <button class="btn btn-red btn-sm" onclick="logoutDashboard()">🚪 Déconnexion</button>
+      </div>
+    </div>
+
     <!-- Recent action history -->
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
@@ -629,6 +667,7 @@ let allFiles = [];
 let currentCat = 'all';
 let refreshInterval;
 let selectedDownloadHash = '';
+let appConfig = null;
 
 // ── Tab navigation ──
 document.querySelectorAll('.tab').forEach(t => {
@@ -641,7 +680,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'downloads') loadDownloads();
     if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
-    if (t.dataset.tab === 'settings') { loadSettings(); loadBookmarklet(); loadActionHistory(); runDebug(); }
+    if (t.dataset.tab === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(); runDebug(); }
     if (t.dataset.tab === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
   });
 });
@@ -659,6 +698,22 @@ async function api(path, options = {}) {
 
 function getActionMessage(d, fallback = 'Erreur inconnue') {
   return d?.message || d?.error || d?.output || fallback;
+}
+
+function isReadOnlyMode() {
+  return !!(appConfig && appConfig.read_only);
+}
+
+function ensureWritable(actionLabel = 'Cette action') {
+  if (isReadOnlyMode()) {
+    showToast('err', actionLabel + ' est bloquée : mode lecture seule activé');
+    return false;
+  }
+  return true;
+}
+
+function readonlyDisabledAttr() {
+  return isReadOnlyMode() ? 'disabled title="Mode lecture seule" style="opacity:.55;cursor:not-allowed"' : '';
 }
 
 function setButtonPending(btn, pending, pendingText = '...') {
@@ -689,6 +744,7 @@ async function apiCall(path, opts = {}) {
   if (getActiveTab() === 'settings') {
     loadActionHistory();
     runDebug();
+    loadAppConfig();
   }
   return d;
 }
@@ -908,9 +964,9 @@ async function loadDownloads() {
       <td style="white-space:nowrap">
         <button class="btn btn-ghost btn-sm" onclick="loadDownloadDetail('${dl.hash}')" title="Détail">ℹ️</button>
         ${dl.status === 'paused' || dl.status === 'stopped'
-          ? `<button class="btn btn-green btn-sm" onclick="handleTransferAction('resume','${dl.hash}', this)" title="Reprendre">▶</button>`
-          : `<button class="btn btn-ghost btn-sm" onclick="handleTransferAction('pause','${dl.hash}', this)" title="Pause">⏸</button>`}
-        <button class="btn btn-red btn-sm" onclick="handleTransferAction('cancel','${dl.hash}', this)" title="Supprimer" style="margin-left:2px">✕</button>
+          ? `<button class=\"btn btn-green btn-sm\" onclick=\"handleTransferAction('resume','${dl.hash}', this)\" title=\"Reprendre\" ${readonlyDisabledAttr()}>▶</button>`
+          : `<button class=\"btn btn-ghost btn-sm\" onclick=\"handleTransferAction('pause','${dl.hash}', this)\" title=\"Pause\" ${readonlyDisabledAttr()}>⏸</button>`}
+        <button class=\"btn btn-red btn-sm\" onclick=\"handleTransferAction('cancel','${dl.hash}', this)\" title=\"Supprimer\" style=\"margin-left:2px\" ${readonlyDisabledAttr()}>✕</button>
       </td>
     </tr>`;
   });
@@ -1057,7 +1113,7 @@ function applyResultFilters(raw = null) {
       <td>${r.size || '—'}</td>
       <td>${r.sources || '—'}</td>
       <td style="white-space:nowrap">
-        <button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id}, this)" title="Télécharger">⬇️</button>
+        <button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id}, this)" title="Télécharger" ${readonlyDisabledAttr()}>⬇️</button>
         <button class="btn btn-ghost btn-sm" onclick="saveFavorite(${r.id})" title="Favori" style="margin-left:2px">⭐</button>
       </td>
     </tr>`;
@@ -1090,6 +1146,7 @@ function toggleSelectVisibleResults(checked) {
 }
 
 async function bulkDownloadSelected(btn = null) {
+  if (!ensureWritable('Le téléchargement en lot')) return;
   const ids = Array.from(window._selectedResultIds || []);
   if (!ids.length) {
     showToast('err', 'Aucun résultat sélectionné');
@@ -1117,6 +1174,7 @@ function openDownloadsTab() {
 }
 
 async function downloadResult(id, btn = null, silent = false) {
+  if (!silent && !ensureWritable("Le téléchargement")) return null;
   if (!silent) setButtonPending(btn, true, 'Ajout...');
   const d = await api('/api/download?id=' + id);
   if (!silent) setButtonPending(btn, false);
@@ -1136,6 +1194,7 @@ async function downloadResult(id, btn = null, silent = false) {
 }
 
 async function handleTransferAction(action, hash, btn = null) {
+  if (!ensureWritable('Cette action transfert')) return null;
   const endpoint = action === 'cancel' ? '/api/cancel?hash=' : '/api/' + action + '?hash=';
   const labels = {
     pause: 'Pause...',
@@ -1151,6 +1210,7 @@ async function handleTransferAction(action, hash, btn = null) {
 }
 
 async function handleBulkTransferAction(action, btn = null) {
+  if (!ensureWritable('Cette action globale')) return null;
   const d = await apiCall('/api/' + action, {
     button: btn,
     pendingText: action === 'pause' ? 'Pause...' : 'Reprise...',
@@ -1423,6 +1483,7 @@ async function loadBookmarklet() {
 
 // ── ED2K Links ──
 async function addEd2k() {
+  if (!ensureWritable("L'ajout ED2K")) return;
   const input = document.getElementById('ed2kLink');
   const link = input.value.trim();
   const msg = document.getElementById('ed2kMsg');
@@ -1605,11 +1666,84 @@ function esc(s) {
 // ── Settings ──
 let currentSettings = null;
 
+function renderSystemModeBanner() {
+  const el = document.getElementById('systemModeBanner');
+  if (!el) return;
+  if (!appConfig) { el.style.display = 'none'; return; }
+  const readOnly = !!appConfig.read_only;
+  el.style.display = 'block';
+  el.innerHTML = `<div class="card" style="padding:12px;border-color:${readOnly ? 'rgba(245,158,11,.35)' : 'rgba(34,197,94,.25)'};background:${readOnly ? 'rgba(245,158,11,.08)' : 'rgba(34,197,94,.08)'}">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+      <div style="font-size:.9em;font-weight:700">${readOnly ? '🟡 Mode lecture seule actif' : '🟢 Mode écriture actif'}</div>
+      <div style="font-size:.76em;color:var(--text3)">Refresh ${appConfig.refresh_interval_sec || 5}s · Historique ${appConfig.action_history_limit || 80}</div>
+    </div>
+    <div style="font-size:.8em;color:var(--text2);margin-top:4px">${readOnly ? 'Les téléchargements, suppressions, scans et modifications sont bloqués côté UI et côté serveur.' : 'Les actions sensibles sont autorisées, avec rate limiting serveur.'}</div>
+  </div>`;
+}
+
+function renderAppConfig(config) {
+  appConfig = config || appConfig || {};
+  const summary = document.getElementById('appModeSummary');
+  const setVal = (id, value) => { const el = document.getElementById(id); if (el) { if (el.type === 'checkbox') el.checked = !!value; else el.value = value ?? ''; } };
+  setVal('cfgReadOnly', appConfig.read_only);
+  setVal('cfgDebugMode', appConfig.debug_mode);
+  setVal('cfgRefreshInterval', appConfig.refresh_interval_sec || 5);
+  setVal('cfgHistoryLimit', appConfig.action_history_limit || 80);
+  setVal('cfgWriteRate', appConfig.write_rate_limit_per_minute || 30);
+  setVal('cfgLoginRate', appConfig.login_rate_limit_per_minute || 20);
+  if (summary) summary.textContent = `${appConfig.read_only ? 'Lecture seule' : 'Écriture autorisée'} · Refresh ${appConfig.refresh_interval_sec || 5}s · Historique ${appConfig.action_history_limit || 80} · Debug ${appConfig.debug_mode ? 'ON' : 'OFF'}`;
+  renderSystemModeBanner();
+  restartAutoRefresh();
+}
+
+async function loadAppConfig() {
+  const d = await api('/api/app_config');
+  if (d?.config) renderAppConfig(d.config);
+}
+
+async function saveAppConfig(btn = null) {
+  const payload = {
+    read_only: !!document.getElementById('cfgReadOnly')?.checked,
+    debug_mode: !!document.getElementById('cfgDebugMode')?.checked,
+    refresh_interval_sec: parseInt(document.getElementById('cfgRefreshInterval')?.value || '5', 10),
+    action_history_limit: parseInt(document.getElementById('cfgHistoryLimit')?.value || '80', 10),
+    write_rate_limit_per_minute: parseInt(document.getElementById('cfgWriteRate')?.value || '30', 10),
+    login_rate_limit_per_minute: parseInt(document.getElementById('cfgLoginRate')?.value || '20', 10),
+  };
+  setButtonPending(btn, true, 'Sauvegarde...');
+  const d = await api('/api/dashboard_config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  setButtonPending(btn, false);
+  if (d?.ok) {
+    renderAppConfig(d.config || payload);
+    showToast('ok', 'Configuration dashboard sauvegardée');
+    loadActionHistory();
+    runDebug();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur de sauvegarde'));
+  }
+}
+
+async function clearActionHistory() {
+  const d = await api('/api/action_history/clear', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  if (d?.ok) {
+    showToast('ok', d.message || 'Historique vidé');
+    loadActionHistory();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur'));
+  }
+}
+
+async function logoutDashboard() {
+  await api('/api/logout', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  window.location = '/login';
+}
+
 async function loadSettings() {
   const d = await api('/api/settings');
   if (!d || !d.settings) return;
   currentSettings = d.settings;
   renderSourcesList(currentSettings.server_sources || []);
+  renderAppConfig(currentSettings.dashboard || d.dashboard || {});
   // Last scan info
   const lastScan = currentSettings.last_scan;
   const el = document.getElementById('lastScanInfo');
@@ -1640,13 +1774,14 @@ function renderSourcesList(sources) {
         <div style="font-size:.75em;color:var(--text3);word-break:break-all">${esc(src.url)}</div>
         <div style="font-size:.72em;color:var(--text3);margin-top:2px">${kindBadge} · Priorité ${src.priority || 0}${src.description ? ' · ' + esc(src.description) : ''}</div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="toggleSource('${esc(src.key)}')" title="${enabled ? 'Désactiver' : 'Activer'}">${enabled ? '✅' : '⬜'}</button>
-      <button class="btn btn-red btn-sm" onclick="removeSource('${esc(src.key)}','${esc(src.url)}')" title="Supprimer">✕</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleSource('${esc(src.key)}')" title="${enabled ? 'Désactiver' : 'Activer'}" ${readonlyDisabledAttr()}>${enabled ? '✅' : '⬜'}</button>
+      <button class="btn btn-red btn-sm" onclick="removeSource('${esc(src.key)}','${esc(src.url)}')" title="Supprimer" ${readonlyDisabledAttr()}>✕</button>
     </div>`;
   }).join('');
 }
 
 async function toggleSource(key) {
+  if (!ensureWritable('Le changement de source')) return;
   const r = await fetch('/api/settings/toggle_source', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({key})
@@ -1657,6 +1792,7 @@ async function toggleSource(key) {
 }
 
 async function removeSource(key, url) {
+  if (!ensureWritable('La suppression de source')) return;
   if (!confirm('Supprimer cette source ?')) return;
   const r = await fetch('/api/settings/remove_source', {
     method: 'POST', headers: {'Content-Type':'application/json'},
@@ -1668,6 +1804,7 @@ async function removeSource(key, url) {
 }
 
 async function addSource() {
+  if (!ensureWritable("L'ajout de source")) return;
   const url = document.getElementById('newSourceUrl').value.trim();
   const kind = document.getElementById('newSourceKind').value;
   const label = document.getElementById('newSourceLabel').value.trim();
@@ -1706,6 +1843,7 @@ async function kadStatus() {
 }
 
 async function kadReconnect() {
+  if (!ensureWritable('La reconnexion')) return;
   showToast('info', 'Reconnexion en cours...');
   const d = await api('/api/kad/reconnect');
   if (d && d.ok) {
@@ -1718,6 +1856,7 @@ async function kadReconnect() {
 
 // ── Scan Now ──
 async function scanNow() {
+  if (!ensureWritable('Le scan')) return;
   showToast('info', 'Scan des sources lancé (quelques secondes)...');
   const d = await api('/api/scan_now');
   if (d && d.ok) showToast('ok', d.message || 'Scan lancé');
@@ -1726,6 +1865,7 @@ async function scanNow() {
 
 // ── Connect ED2K with detailed logging ──
 async function connectED2K() {
+  if (!ensureWritable('La connexion ED2K')) return;
   const msg = document.getElementById('connectResult');
   if (msg) {
     msg.className = 'msg info show';
@@ -1795,6 +1935,7 @@ async function loadActionHistory() {
   summaryEl.textContent = 'Chargement...';
   const d = await api('/api/action_history?limit=20');
   const actions = d?.actions || [];
+  const limit = d?.limit || appConfig?.action_history_limit || 20;
   if (!actions.length) {
     summaryEl.textContent = 'Aucune action récente';
     listEl.innerHTML = '<div class="empty">Aucune action récente</div>';
@@ -1802,7 +1943,7 @@ async function loadActionHistory() {
   }
   const okCount = actions.filter(a => a.ok).length;
   const confirmedCount = actions.filter(a => a.confirmed).length;
-  summaryEl.textContent = `${actions.length} action(s) récentes · ${okCount} OK · ${confirmedCount} confirmées`;
+  summaryEl.textContent = `${actions.length} action(s) récentes / max ${limit} · ${okCount} OK · ${confirmedCount} confirmées`;
   listEl.innerHTML = '<div style="display:grid;gap:6px">' + actions.map(a => {
     const color = a.ok ? (a.confirmed ? 'var(--green)' : 'var(--orange)') : 'var(--red)';
     const status = a.ok ? (a.confirmed ? 'confirmé' : 'envoyé') : 'échec';
@@ -1841,7 +1982,7 @@ async function runDebug() {
     ];
     summary.innerHTML = cards.map(([label, value]) => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px"><div style="font-size:.72em;color:var(--text3);margin-bottom:4px">${esc(label)}</div><div style="font-size:.9em;font-weight:600;word-break:break-word">${esc(value)}</div></div>`).join('');
   }
-  if (raw) raw.textContent = JSON.stringify(d, null, 2);
+  if (raw) raw.textContent = (appConfig && appConfig.debug_mode === false) ? 'Mode debug étendu désactivé' : JSON.stringify(d, null, 2);
 }
 
 // ── Init & Auto-refresh ──
@@ -1850,7 +1991,19 @@ function getActiveTab() {
   return active ? active.dataset.tab : 'dashboard';
 }
 
+function restartAutoRefresh() {
+  if (refreshInterval) clearInterval(refreshInterval);
+  const seconds = Math.max(2, parseInt(appConfig?.refresh_interval_sec || 5, 10));
+  refreshInterval = setInterval(async () => {
+    await loadStatus();
+    await loadDownloads();
+    const tab = getActiveTab();
+    if (tab === 'servers') await loadServers();
+  }, seconds * 1000);
+}
+
 async function init() {
+  await loadAppConfig();
   await loadStatus();
   await loadDownloads();
   await loadFiles();
@@ -1859,13 +2012,8 @@ async function init() {
   loadStatsChart();
   loadBookmarklet();
 
-  // Auto-refresh: status + downloads always, stats chart every minute
-  refreshInterval = setInterval(async () => {
-    await loadStatus();
-    await loadDownloads();
-    const tab = getActiveTab();
-    if (tab === 'servers') await loadServers();
-  }, 5000);
+  // Auto-refresh: status + downloads always, interval configurable
+  restartAutoRefresh();
 
   // Refresh stats chart every 60s
   setInterval(loadStatsChart, 60000);
