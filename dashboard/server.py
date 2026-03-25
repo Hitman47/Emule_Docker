@@ -15,7 +15,7 @@ import re
 import hashlib
 import threading
 import html
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -234,7 +234,7 @@ def unchanged_payload(digest, **extra):
 
 
 # ── Action state ──
-_action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel")}
+_action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel", "favorite_download")}
 _last_search_context = {"query": "", "type": "kad", "results": [], "timestamp": 0}
 
 
@@ -1314,6 +1314,109 @@ MAX_SAVED_SEARCHES = 40
 APP_EXPORT_VERSION = 1
 
 
+def _favorite_name_from_link(link):
+    link = str(link or "").strip()
+    m = re.match(r'^ed2k://\|search_result\|\d+\|(.+?)\|/$', link, re.I)
+    if m:
+        return unquote(m.group(1))
+    parsed = parse_ed2k_link(link)
+    if parsed:
+        return parsed.get("name", "")
+    return ""
+
+
+def _favorite_search_key(name, query, search_type, size=""):
+    return f"search::{search_type.strip().lower()}::{query.strip().lower()}::{name.strip().lower()}::{str(size or '').strip().lower()}"
+
+
+def favorite_dedupe_key(item):
+    item = item or {}
+    kind = str(item.get("kind") or "").strip().lower()
+    link = str(item.get("link") or "").strip()
+    name = str(item.get("name") or "").strip()
+    if not name and link:
+        name = _favorite_name_from_link(link)
+    if kind == "search_result" or link.lower().startswith("ed2k://|search_result|"):
+        query = str(item.get("query") or "").strip()
+        search_type = str(item.get("search_type") or item.get("type") or "kad").strip().lower() or "kad"
+        return _favorite_search_key(name, query, search_type, item.get("size", ""))
+    if link:
+        return f"link::{link.lower()}"
+    return ""
+
+
+def normalize_favorite_entry(item):
+    if not isinstance(item, dict):
+        return None
+    link = str(item.get("link") or "").strip()
+    name = str(item.get("name") or "").strip()
+    if not name and link:
+        name = _favorite_name_from_link(link)
+    kind = str(item.get("kind") or "").strip().lower()
+    if not kind:
+        if link.lower().startswith("ed2k://|search_result|") or item.get("query"):
+            kind = "search_result"
+        elif link.lower().startswith("ed2k://"):
+            kind = "ed2k_link"
+    if kind not in ("ed2k_link", "search_result"):
+        kind = "ed2k_link" if link.lower().startswith("ed2k://") else "search_result"
+    query = str(item.get("query") or "").strip()
+    search_type = str(item.get("search_type") or item.get("type") or "kad").strip().lower() or "kad"
+    added = str(item.get("added") or "").strip() or time.strftime("%Y-%m-%d %H:%M")
+    try:
+        created_ts = int(item.get("created_ts") or 0)
+    except Exception:
+        created_ts = 0
+    if created_ts <= 0:
+        created_ts = int(time.time())
+    try:
+        sources = int(item.get("sources", 0) or 0)
+    except Exception:
+        sources = 0
+    size = str(item.get("size") or "").strip()
+    try:
+        size_mb = float(item.get("size_mb", 0) or 0)
+    except Exception:
+        size_mb = 0.0
+    if not size_mb and size:
+        size_bytes = size_to_bytes(size)
+        if size_bytes:
+            size_mb = round(size_bytes / (1024 * 1024), 3)
+    else:
+        size_bytes = size_to_bytes(size)
+    base = {
+        "kind": kind,
+        "name": name,
+        "link": link,
+        "size": size,
+        "size_mb": size_mb,
+        "sources": sources,
+        "added": added,
+        "created_ts": created_ts,
+        "query": query,
+        "search_type": search_type,
+    }
+    dedupe = favorite_dedupe_key(base)
+    favorite_id = str(item.get("favorite_id") or item.get("id") or "").strip()
+    if not favorite_id:
+        favorite_id = hashlib.sha1((dedupe or repr(base)).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    base["favorite_id"] = favorite_id
+    if size_bytes:
+        base["size_bytes"] = int(size_bytes)
+    return base if (base.get("link") or base.get("query")) else None
+
+
+def get_favorites():
+    h = _load_history()
+    favorites = []
+    for item in h.get("favorites", []):
+        norm = normalize_favorite_entry(item)
+        if norm:
+            favorites.append(norm)
+    favorites.sort(key=lambda x: (-(int(x.get("created_ts") or 0)), x.get("name", "").lower()))
+    return favorites[:MAX_FAVORITES]
+
+
 def _normalize_history_shape(data):
     if not isinstance(data, dict):
         data = {}
@@ -1321,6 +1424,20 @@ def _normalize_history_shape(data):
     data.setdefault("favorites", [])
     data.setdefault("saved_searches", [])
     data.setdefault("action_history", [])
+    favorites = []
+    seen = set()
+    for item in data.get("favorites", []):
+        norm = normalize_favorite_entry(item)
+        if not norm:
+            continue
+        key = norm.get("favorite_id") or favorite_dedupe_key(norm)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        favorites.append(norm)
+        if len(favorites) >= MAX_FAVORITES:
+            break
+    data["favorites"] = favorites
     return data
 
 
@@ -1486,23 +1603,41 @@ def add_search_history(query, search_type, result_count):
     h["searches"] = h["searches"][:MAX_SEARCH_HISTORY]
     _save_history(h)
 
-def add_favorite(name, ed2k_link, size="", sources=0):
+def add_favorite(name, ed2k_link, size="", sources=0, *, kind=None, query="", search_type="kad"):
     h = _load_history()
     if "favorites" not in h:
         h["favorites"] = []
-    # No duplicate links
-    if any(f.get("link") == ed2k_link for f in h["favorites"]):
+    entry = normalize_favorite_entry({
+        "name": name,
+        "link": ed2k_link,
+        "size": size,
+        "sources": sources,
+        "added": time.strftime("%Y-%m-%d %H:%M"),
+        "created_ts": int(time.time()),
+        "kind": kind,
+        "query": query,
+        "search_type": search_type,
+    })
+    if not entry:
         return False
-    h["favorites"].insert(0, {"name": name, "link": ed2k_link, "size": size,
-                                "sources": sources, "added": time.strftime("%Y-%m-%d %H:%M")})
+    dedupe = favorite_dedupe_key(entry)
+    if any(favorite_dedupe_key(f) == dedupe for f in h["favorites"]):
+        return False
+    h["favorites"] = [f for f in h.get("favorites", []) if favorite_dedupe_key(f) != dedupe]
+    h["favorites"].insert(0, entry)
     h["favorites"] = h["favorites"][:MAX_FAVORITES]
     _save_history(h)
     return True
 
-def remove_favorite(link):
+
+def remove_favorite(ref):
+    ref = str(ref or "").strip()
     h = _load_history()
     before = len(h.get("favorites", []))
-    h["favorites"] = [f for f in h.get("favorites", []) if f.get("link") != link]
+    h["favorites"] = [
+        f for f in h.get("favorites", [])
+        if str(f.get("favorite_id") or "") != ref and str(f.get("link") or "") != ref
+    ]
     _save_history(h)
     return before - len(h["favorites"])
 
@@ -2080,6 +2215,313 @@ def add_multiple_ed2k_confirmed(raw_text):
         'already_exists': already,
         'failed': failed,
         'results': results[:50],
+    })
+
+
+def normalize_match_text(value):
+    value = unquote(str(value or "")).strip().lower()
+    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
+
+
+def match_favorite_to_search_result(favorite, results):
+    results = results or []
+    target_name = str(favorite.get("name") or "").strip()
+    if not target_name:
+        return None
+    target_norm = normalize_match_text(target_name)
+    target_bytes = favorite.get("size_bytes") or size_to_bytes(favorite.get("size", ""))
+    scored = []
+    for row in results:
+        row_name = str(row.get("name") or "").strip()
+        row_norm = normalize_match_text(row_name)
+        if not row_norm:
+            continue
+        exact_name = row_name == target_name
+        norm_name = row_norm == target_norm
+        if not exact_name and not norm_name:
+            continue
+        row_bytes = size_to_bytes(row.get("size", ""))
+        size_match = False
+        if target_bytes and row_bytes:
+            tolerance = max(int(target_bytes * 0.02), 2 * 1024 * 1024)
+            size_match = abs(row_bytes - target_bytes) <= tolerance
+        score = 0
+        if exact_name:
+            score += 200
+        if norm_name:
+            score += 120
+        if size_match:
+            score += 80
+        score += min(int(row.get("sources", 0) or 0), 50)
+        scored.append((score, row))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = scored[0]
+    if best_score < 120:
+        return None
+    return best
+
+
+def fetch_search_results_for_query(query, search_type):
+    query = str(query or "").strip()
+    search_type = str(search_type or "kad").strip().lower() or "kad"
+    output = run_amulecmd_interactive([f"search {search_type} {query}", ("sleep", 3.5), "results"], timeout=30)
+    err = classify_amule_error(output)
+    results = [] if err else parse_search_results(output)
+    return results, output, err
+
+
+def summarize_favorite_download_results(results):
+    results = [dict(item) for item in (results or []) if isinstance(item, dict)]
+    summary = {
+        "total": len(results),
+        "success": 0,
+        "already": 0,
+        "failed": 0,
+        "missing": 0,
+        "counts_by_code": {},
+        "confirmed_favorite_ids": [],
+        "failed_favorite_ids": [],
+        "missing_favorite_ids": [],
+        "success_items": [],
+        "already_items": [],
+        "failed_items": [],
+    }
+    for item in results:
+        code = str(item.get("code") or "UNKNOWN")
+        fid = str(item.get("favorite_id") or "")
+        summary["counts_by_code"][code] = summary["counts_by_code"].get(code, 0) + 1
+        compact = {
+            "favorite_id": fid,
+            "name": item.get("name", ""),
+            "kind": item.get("kind", ""),
+            "code": code,
+            "message": item.get("message", ""),
+        }
+        if code == "SUCCESS":
+            summary["success"] += 1
+            if fid:
+                summary["confirmed_favorite_ids"].append(fid)
+            summary["success_items"].append(compact)
+        elif code == "ALREADY_EXISTS":
+            summary["already"] += 1
+            if fid:
+                summary["confirmed_favorite_ids"].append(fid)
+            summary["already_items"].append(compact)
+        elif code == "RESULT_NOT_FOUND":
+            summary["missing"] += 1
+            if fid:
+                summary["missing_favorite_ids"].append(fid)
+            summary["failed_items"].append(compact)
+        else:
+            summary["failed"] += 1
+            if fid:
+                summary["failed_favorite_ids"].append(fid)
+            summary["failed_items"].append(compact)
+    return summary
+
+
+def _favorite_result_from_payload(favorite, payload):
+    data = payload.get("data") or {}
+    dl = data.get("download") or data.get("existing") or {}
+    return {
+        "favorite_id": favorite.get("favorite_id", ""),
+        "kind": favorite.get("kind", ""),
+        "name": favorite.get("name") or dl.get("name", ""),
+        "code": payload.get("code"),
+        "message": payload.get("message", ""),
+        "confirmed": bool(payload.get("confirmed")),
+        "ok": bool(payload.get("ok")),
+        "hash": dl.get("hash", ""),
+        "query": favorite.get("query", ""),
+        "search_type": favorite.get("search_type", ""),
+    }
+
+
+def download_favorites(entries):
+    favorites = []
+    seen = set()
+    for raw in entries or []:
+        fav = normalize_favorite_entry(raw)
+        if not fav:
+            continue
+        fid = fav.get("favorite_id") or favorite_dedupe_key(fav)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        favorites.append(fav)
+    if not favorites:
+        return action_response("favorite_download", False, "INVALID_INPUT", "Aucun favori valide fourni.", status=400)
+
+    results = []
+    current_downloads = parse_downloads(run_amulecmd("show dl"))
+
+    direct_favorites = [f for f in favorites if f.get("kind") != "search_result"]
+    search_favorites = [f for f in favorites if f.get("kind") == "search_result"]
+
+    for fav in direct_favorites:
+        payload, _status = add_ed2k_confirmed(fav.get("link", ""))
+        results.append(_favorite_result_from_payload(fav, payload))
+    if direct_favorites:
+        current_downloads = parse_downloads(run_amulecmd("show dl"))
+
+    grouped = {}
+    for fav in search_favorites:
+        key = (fav.get("search_type") or "kad", fav.get("query") or "")
+        grouped.setdefault(key, []).append(fav)
+
+    for (search_type, query), group in grouped.items():
+        if not query.strip():
+            for fav in group:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": fav.get("name", ""),
+                    "code": "INVALID_INPUT",
+                    "message": "Ce favori de recherche n'a pas de requête associée.",
+                    "confirmed": False,
+                    "ok": False,
+                    "query": query,
+                    "search_type": search_type,
+                })
+            continue
+
+        search_results, search_output, search_err = fetch_search_results_for_query(query, search_type)
+        if search_err:
+            for fav in group:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": fav.get("name", ""),
+                    "code": search_err,
+                    "message": normalize_action_error("download", search_err, search_output),
+                    "confirmed": False,
+                    "ok": False,
+                    "query": query,
+                    "search_type": search_type,
+                })
+            continue
+
+        attempts = []
+        used_result_ids = set()
+        for fav in group:
+            matched = match_favorite_to_search_result(fav, search_results)
+            if not matched:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": fav.get("name", ""),
+                    "code": "RESULT_NOT_FOUND",
+                    "message": normalize_action_error("download", "RESULT_NOT_FOUND"),
+                    "confirmed": False,
+                    "ok": False,
+                    "query": query,
+                    "search_type": search_type,
+                })
+                continue
+            existing = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=current_downloads)
+            if existing:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": matched.get("name", fav.get("name", "")),
+                    "code": "ALREADY_EXISTS",
+                    "message": normalize_action_error("download", "ALREADY_EXISTS"),
+                    "confirmed": True,
+                    "ok": True,
+                    "hash": existing.get("hash", ""),
+                    "query": query,
+                    "search_type": search_type,
+                })
+                continue
+            result_id = int(matched.get("id", 0) or 0)
+            if result_id in used_result_ids:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": matched.get("name", fav.get("name", "")),
+                    "code": "ALREADY_EXISTS",
+                    "message": "Ce résultat est déjà ciblé par un autre favori sélectionné.",
+                    "confirmed": True,
+                    "ok": True,
+                    "query": query,
+                    "search_type": search_type,
+                })
+                continue
+            used_result_ids.add(result_id)
+            attempts.append((fav, matched))
+
+        interactive_output = ""
+        err = None
+        if attempts:
+            commands = [f"search {search_type} {query}", ("sleep", 3.5), "results", ("sleep", 0.3)]
+            commands.extend([f"download {int(match.get('id'))}" for _, match in attempts])
+            interactive_output = run_amulecmd_interactive(commands, timeout=max(30, 20 + len(attempts) * 2))
+            err = classify_amule_error(interactive_output)
+            time.sleep(0.7)
+            current_downloads = parse_downloads(run_amulecmd("show dl"))
+
+        for fav, matched in attempts:
+            created = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=current_downloads)
+            if created:
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": matched.get("name", fav.get("name", "")),
+                    "code": "SUCCESS",
+                    "message": "Favori confirmé dans les transferts.",
+                    "confirmed": True,
+                    "ok": True,
+                    "hash": created.get("hash", ""),
+                    "query": query,
+                    "search_type": search_type,
+                })
+            else:
+                failure_code = err or "STATE_NOT_CONFIRMED"
+                results.append({
+                    "favorite_id": fav.get("favorite_id", ""),
+                    "kind": fav.get("kind", ""),
+                    "name": matched.get("name", fav.get("name", "")),
+                    "code": failure_code,
+                    "message": normalize_action_error("download", failure_code, interactive_output),
+                    "confirmed": False,
+                    "ok": False,
+                    "query": query,
+                    "search_type": search_type,
+                })
+
+    order = {fav.get("favorite_id"): idx for idx, fav in enumerate(favorites)}
+    results.sort(key=lambda item: order.get(item.get("favorite_id"), 999999))
+    summary = summarize_favorite_download_results(results)
+    success = summary["success"]
+    already = summary["already"]
+    missing = summary["missing"]
+    failed = summary["failed"]
+    total = len(favorites)
+    if failed == 0 and missing == 0 and success == total:
+        code = "SUCCESS"
+        ok = True
+        status = 200
+    elif failed == 0 and missing == 0 and success + already == total:
+        code = "SUCCESS" if success else "ALREADY_EXISTS"
+        ok = True
+        status = 200
+    elif success > 0 or already > 0:
+        code = "PARTIAL_SUCCESS"
+        ok = True
+        status = 207
+    else:
+        code = "RESULT_NOT_FOUND" if missing == total else "COMMAND_FAILED"
+        ok = False
+        status = 404 if missing == total else 502
+    if success:
+        cache_clear("downloads")
+    message = f"Favoris: {success} ajouté(s), {already} déjà présent(s), {missing} introuvable(s), {failed} échec(s)."
+    return action_response("favorite_download", ok, code, message, confirmed=(success + already == total and failed == 0 and missing == 0), status=status, data={
+        "summary": summary,
+        "results": results[:300],
+        "changed_favorite_ids": summary["confirmed_favorite_ids"],
     })
 
 
@@ -2769,8 +3211,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"saved_searches": get_saved_searches()})
 
         elif path == "/api/favorites":
-            h = _load_history()
-            self.send_json({"favorites": h.get("favorites", [])})
+            self.send_json({"favorites": get_favorites()})
 
         elif path == "/api/stats_history":
             stats = _load_stats()
@@ -2987,20 +3428,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == "/api/favorites/add":
             name = data.get("name", "")
             link = data.get("link", "")
-            if not link.startswith("ed2k://"):
-                self.send_json({"error": "Lien ed2k invalide"}, 400)
+            kind = str(data.get("kind") or "").strip().lower()
+            query = str(data.get("query") or "").strip()
+            search_type = str(data.get("search_type") or data.get("type") or "kad").strip().lower() or "kad"
+            if not link.startswith("ed2k://") and not query:
+                self.send_json({"error": "Favori invalide"}, 400)
                 return
-            added = add_favorite(name, link, data.get("size", ""), data.get("sources", 0))
-            self.send_json({"ok": True, "added": added})
+            added = add_favorite(name, link, data.get("size", ""), data.get("sources", 0), kind=kind or None, query=query, search_type=search_type)
+            self.send_json({"ok": True, "added": added, "favorites": get_favorites()})
 
         elif parsed.path == "/api/favorites/remove":
-            link = data.get("link", "")
-            removed = remove_favorite(link)
+            ref = data.get("favorite_id") or data.get("link") or ""
+            removed = remove_favorite(ref)
             self.send_json({"ok": True, "removed": removed})
 
         elif parsed.path == "/api/favorites/download":
-            link_blob = str(data.get("link") or data.get("text") or "")
-            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
+            favorite_ids = data.get("favorite_ids")
+            favorite_id = data.get("favorite_id")
+            download_all = bool(data.get("download_all"))
+            if favorite_ids is not None or favorite_id is not None or download_all:
+                favorites = get_favorites()
+                selected = []
+                if download_all:
+                    selected = favorites
+                else:
+                    wanted = []
+                    if isinstance(favorite_ids, list):
+                        wanted.extend([str(x) for x in favorite_ids if str(x).strip()])
+                    if favorite_id is not None:
+                        wanted.append(str(favorite_id))
+                    wanted_set = set(wanted)
+                    selected = [fav for fav in favorites if fav.get("favorite_id") in wanted_set]
+                payload, status = execute_locked_action("favorite_download", lambda: download_favorites(selected))
+            else:
+                link_blob = str(data.get("link") or data.get("text") or "")
+                payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
             self.send_json(payload, status)
 
         elif parsed.path == "/api/search_history/clear":

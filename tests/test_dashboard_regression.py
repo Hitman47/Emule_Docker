@@ -48,6 +48,22 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertTrue(all(link.startswith('ed2k://') for link in links))
 
 
+
+    def test_normalize_favorite_entry_keeps_search_metadata(self):
+        fav = server.normalize_favorite_entry({
+            'name': 'Ubuntu.iso',
+            'link': 'ed2k://|search_result|12|Ubuntu.iso|/',
+            'size': '700 MB',
+            'sources': 12,
+            'kind': 'search_result',
+            'query': 'ubuntu',
+            'search_type': 'kad',
+        })
+        self.assertEqual(fav['kind'], 'search_result')
+        self.assertEqual(fav['query'], 'ubuntu')
+        self.assertEqual(fav['search_type'], 'kad')
+        self.assertTrue(fav['favorite_id'])
+
     def test_parse_downloads_exposes_size_metrics(self):
         raw = '''> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA File One.mkv
   512.0/1024.0 MB  50%
@@ -155,6 +171,39 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(payload['data']['summary']['missing'], 1)
         self.assertEqual(payload['data']['summary']['total'], 3)
         self.assertIn(1, payload['data']['changed_result_ids'])
+
+
+    def test_download_favorites_supports_search_result_favorites(self):
+        fav = {
+            'favorite_id': 'fav-search-1',
+            'name': 'Alpha.iso',
+            'link': 'ed2k://|search_result|1|Alpha.iso|/',
+            'size': '700 MB',
+            'sources': 20,
+            'kind': 'search_result',
+            'query': 'ubuntu',
+            'search_type': 'kad',
+        }
+        before_raw = ''
+        after_raw = '> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Alpha.iso\n  0.0/700.0 MB  0%\n  Sources: 0\n  0.0 KB/s waiting\n'
+        search_output = '0.    Alpha.iso  700.0  12\n1.    Beta.iso  800.0  2\n'
+
+        def fake_run_amulecmd(cmd, timeout=20):
+            if cmd == 'show dl':
+                if fake_run_amulecmd.calls == 0:
+                    fake_run_amulecmd.calls += 1
+                    return before_raw
+                return after_raw
+            raise AssertionError(f'unexpected command: {cmd}')
+        fake_run_amulecmd.calls = 0
+
+        with mock.patch.object(server, 'run_amulecmd', side_effect=fake_run_amulecmd),              mock.patch.object(server, 'run_amulecmd_interactive', side_effect=[search_output, 'OK']),              mock.patch.object(server.time, 'sleep', return_value=None):
+            payload, status = server.download_favorites([fav])
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['data']['summary']['success'], 1)
+        self.assertIn('fav-search-1', payload['data']['changed_favorite_ids'])
 
     def test_import_dashboard_bundle_merge_keeps_uniques(self):
         settings = server.normalize_settings(None)
