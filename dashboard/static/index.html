@@ -311,14 +311,19 @@ tr:hover{background:var(--bg3)}
   <!-- TAB: Downloads                             -->
   <!-- ══════════════════════════════════════════ -->
   <div class="panel" id="panel-downloads">
-    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="loadDownloads()">🔄 Rafraîchir</button>
       <button class="btn btn-green btn-sm" onclick="apiCall('/api/resume')">▶ Tout reprendre</button>
       <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/pause')">⏸ Tout pauser</button>
+      <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
     </div>
     <div id="downloadsTable">
       <div class="loading"><div class="spinner"></div></div>
     </div>
+    <details style="margin-top:12px">
+      <summary style="font-size:.78em;color:var(--text3);cursor:pointer">Sortie brute amulecmd (debug)</summary>
+      <pre id="downloadsRaw" style="font-size:.72em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px;max-height:200px;overflow:auto;white-space:pre-wrap"></pre>
+    </details>
   </div>
 
 
@@ -645,33 +650,50 @@ function updateDisk(id, info) {
 
 // ── Downloads ──
 async function loadDownloads() {
-  const d = await api('/api/downloads');
+  const resp = await api('/api/downloads');
   const container = document.getElementById('downloadsTable');
-  if (!d || d.length === 0) {
-    container.innerHTML = '<div class="empty">Aucun transfert en cours</div>';
-    document.getElementById('activeDl').textContent = '0';
+  const rawEl = document.getElementById('downloadsRaw');
+  const refreshInfo = document.getElementById('dlRefreshInfo');
+
+  if (!resp) {
+    container.innerHTML = '<div class="empty">Erreur de communication</div>';
     return;
   }
+
+  // Show raw output for debugging
+  if (rawEl) rawEl.textContent = resp.raw || '(vide)';
+  if (refreshInfo) refreshInfo.textContent = 'MAJ: ' + new Date().toLocaleTimeString('fr-FR');
+
+  const d = resp.downloads || [];
+
+  if (d.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun transfert en cours</div>';
+    document.getElementById('activeDl').textContent = '0';
+    // Clear badge
+    const dlTab = document.querySelector('[data-tab="downloads"]');
+    const badge = dlTab.querySelector('.tab-badge');
+    if (badge) badge.remove();
+    return;
+  }
+
   document.getElementById('activeDl').textContent = d.length;
 
   // Update downloads tab badge
   const dlTab = document.querySelector('[data-tab="downloads"]');
   const existingBadge = dlTab.querySelector('.tab-badge');
   if (existingBadge) existingBadge.remove();
-  if (d.length > 0) {
-    const badge = document.createElement('span');
-    badge.className = 'tab-badge';
-    badge.textContent = d.length;
-    dlTab.appendChild(badge);
-  }
+  const badge = document.createElement('span');
+  badge.className = 'tab-badge';
+  badge.textContent = d.length;
+  dlTab.appendChild(badge);
 
   let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th></tr></thead><tbody>';
   d.forEach(dl => {
     const statusColor = dl.status === 'downloading' ? 'var(--green)' :
-                        dl.status === 'paused' ? 'var(--orange)' :
-                        dl.status === 'error' ? 'var(--red)' : 'var(--text3)';
-    // ETA estimation
-    let eta = '—';
+                        dl.status === 'paused' || dl.status === 'stopped' ? 'var(--orange)' :
+                        dl.status === 'error' ? 'var(--red)' :
+                        dl.status === 'waiting' || dl.status === 'getting sources' ? 'var(--blue)' : 'var(--text3)';
+    let eta = '\u2014';
     if (dl.speed > 0 && dl.progress > 0 && dl.progress < 100) {
       const sizeMatch = (dl.size || '').match(/([\d.]+)\s*(KB|MB|GB|TB)/i);
       if (sizeMatch) {
@@ -689,13 +711,13 @@ async function loadDownloads() {
     }
     html += `<tr>
       <td class="fname" title="${esc(dl.name)}">${esc(dl.name)}</td>
-      <td>${dl.size || '—'}</td>
+      <td>${dl.size || '\u2014'}</td>
       <td style="min-width:120px">
         <div class="pbar"><div class="fill dl" style="width:${dl.progress}%"></div></div>
         <span style="font-size:.75em;color:var(--text3)">${dl.progress.toFixed(1)}%</span>
       </td>
-      <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '—'}</td>
-      <td>${dl.sources || '—'}</td>
+      <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '\u2014'}</td>
+      <td>${dl.sources || '\u2014'}</td>
       <td style="font-size:.82em;color:var(--text2)">${eta}</td>
       <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
     </tr>`;
@@ -1141,11 +1163,11 @@ async function init() {
   await loadDownloads();
   await loadFiles();
 
-  // Auto-refresh every 5s — only fetches data for visible tab
+  // Auto-refresh: status always, downloads always (for badge), tab-specific data
   refreshInterval = setInterval(async () => {
     await loadStatus();
+    await loadDownloads();
     const tab = getActiveTab();
-    if (tab === 'downloads') await loadDownloads();
     if (tab === 'servers') await loadServers();
   }, 5000);
 }

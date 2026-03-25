@@ -541,23 +541,63 @@ start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
-# Auto-connect ED2K in background after amuled is ready
+# Auto-connect ED2K + Kad with retry loop (background)
 (
-    sleep 15
-    printf "[AUTO-CONNECT] Tentative de connexion ED2K...\n"
-    # Source credentials
-    [ -f /etc/environment ] && . /etc/environment
-    # Try plain password then hash
-    OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "connect ed2k" 2>&1)
-    if echo "$OUT" | grep -qi "wrong password\|Authentication failed"; then
-        OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_ENCODED_PWD}" -c "connect ed2k" 2>&1)
+    # Determine which password works
+    _try_cmd() {
+        OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "$1" 2>&1)
+        if echo "$OUT" | grep -qi "wrong password\|Authentication failed"; then
+            OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_ENCODED_PWD}" -c "$1" 2>&1)
+        fi
+        echo "$OUT"
+    }
+
+    # Wait for amuled EC port to be ready
+    printf "[AUTO-CONNECT] Attente du démarrage d'amuled...\n"
+    for i in $(seq 1 30); do
+        if nc -z localhost 4712 2>/dev/null; then
+            printf "[AUTO-CONNECT] Port EC prêt après %ds\n" "$i"
+            break
+        fi
+        sleep 1
+    done
+    sleep 3
+
+    # Import server lists first
+    printf "[AUTO-CONNECT] Import des serveurs...\n"
+    _try_cmd "add ed2k://|serverlist|http://upd.emule-security.org/server.met|/" >/dev/null 2>&1
+    _try_cmd "add ed2k://|serverlist|http://edk.peerates.net/servers/best/server.met|/" >/dev/null 2>&1
+    sleep 2
+
+    # Connect Kad
+    printf "[AUTO-CONNECT] Connexion Kad...\n"
+    _try_cmd "connect kad" >/dev/null 2>&1
+
+    # Retry ED2K connection every 30s for 5 minutes
+    MAX_RETRIES=10
+    RETRY=0
+    while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
+        RETRY=$((RETRY + 1))
+        printf "[AUTO-CONNECT] Tentative ED2K %d/%d...\n" "$RETRY" "$MAX_RETRIES"
+
+        _try_cmd "connect ed2k" >/dev/null 2>&1
+        sleep 8
+
+        STATUS=$(_try_cmd "status")
+        if echo "$STATUS" | grep -qi "ed2k.*connected" && ! echo "$STATUS" | grep -qi "not connected"; then
+            printf "[AUTO-CONNECT] ED2K connecté !\n"
+            printf "[AUTO-CONNECT] %s\n" "$(echo "$STATUS" | grep -i ed2k | head -1)"
+            break
+        fi
+
+        printf "[AUTO-CONNECT] ED2K pas encore connecté, nouvel essai dans 30s...\n"
+        printf "[AUTO-CONNECT] Status: %s\n" "$(echo "$STATUS" | grep -i "ed2k\|kad" | head -2 | tr '\n' ' ')"
+        sleep 30
+    done
+
+    if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
+        printf "[AUTO-CONNECT] ED2K: échec après %d tentatives. Vérifiez les logs.\n" "$MAX_RETRIES"
     fi
-    printf "[AUTO-CONNECT] Résultat: %s\n" "$(echo "$OUT" | tail -3 | tr '\n' ' ')"
-    sleep 5
-    # Also connect Kad if needed
-    amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "connect kad" 2>/dev/null || \
-    amulecmd -h localhost -p 4712 -P "${AMULE_GUI_ENCODED_PWD}" -c "connect kad" 2>/dev/null
-    printf "[AUTO-CONNECT] Connexion Kad envoyée\n"
 ) &
 
 while true; do

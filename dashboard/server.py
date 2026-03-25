@@ -537,27 +537,66 @@ def parse_downloads(raw):
     current = None
     for line in raw.split("\n"):
         line = line.strip()
-        if not line: continue
+        if not line:
+            continue
+
+        # New download entry: "> filename" or "N) filename"
         if line.startswith(">") or re.match(r'^\d+\)', line):
-            if current: downloads.append(current)
-            current = {"name": re.sub(r'^[>\d\)\s]+', '', line).strip(),
-                        "size": "", "progress": 0, "speed": 0, "sources": 0, "status": "unknown"}
+            if current:
+                downloads.append(current)
+            name = re.sub(r'^[>\d\)\s]+', '', line).strip()
+            current = {"name": name, "size": "", "progress": 0, "speed": 0,
+                        "sources": 0, "status": "unknown", "hash": ""}
         elif current:
-            if "size" in line.lower():
-                m = re.search(r'([\d.]+\s*[KMGT]?B)', line, re.I)
-                if m: current["size"] = m.group(1)
+            ll = line.lower()
+            # Size - multiple formats
+            if "size" in ll:
+                m = re.search(r'([\d.]+\s*[KMGT]?i?B)', line, re.I)
+                if m:
+                    current["size"] = m.group(1)
+            # Progress percentage
             if "%" in line:
                 m = re.search(r'([\d.]+)\s*%', line)
-                if m: current["progress"] = float(m.group(1))
-            if "source" in line.lower():
-                m = re.search(r'(\d+)\s*source', line, re.I)
-                if m: current["sources"] = int(m.group(1))
-            if "kb/s" in line.lower():
-                m = re.search(r'([\d.]+)\s*kb/s', line, re.I)
-                if m: current["speed"] = float(m.group(1))
-            for st in ["downloading","paused","waiting","completing","complete","hashing","error"]:
-                if st in line.lower(): current["status"] = st
-    if current: downloads.append(current)
+                if m:
+                    current["progress"] = float(m.group(1))
+            # "Done: X / Y" format
+            if "done" in ll:
+                m = re.search(r'done.*?([\d.]+)\s*/\s*([\d.]+)', ll)
+                if m:
+                    try:
+                        done = float(m.group(1))
+                        total = float(m.group(2))
+                        if total > 0:
+                            current["progress"] = round(done / total * 100, 1)
+                    except ValueError:
+                        pass
+            # Sources
+            if "source" in ll:
+                m = re.search(r'(\d+)\s*(?:source|src)', ll)
+                if m:
+                    current["sources"] = int(m.group(1))
+            # Speed - multiple formats
+            if "kb/s" in ll or "bytes/s" in ll or "speed" in ll:
+                m = re.search(r'([\d.]+)\s*kb/s', ll)
+                if m:
+                    current["speed"] = float(m.group(1))
+                else:
+                    m2 = re.search(r'([\d.]+)\s*bytes/s', ll)
+                    if m2:
+                        current["speed"] = float(m2.group(1)) / 1024
+            # Hash
+            if re.match(r'^[0-9a-f]{32}$', line):
+                current["hash"] = line
+            # Status keywords
+            for st in ["downloading", "paused", "waiting", "completing",
+                        "complete", "hashing", "error", "stopped",
+                        "getting sources", "allocating"]:
+                if st in ll:
+                    current["status"] = st
+                    break
+
+    if current:
+        downloads.append(current)
     return downloads
 
 
@@ -681,11 +720,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(data)
 
         elif path == "/api/downloads":
-            cached = cache_get("downloads", 3)
-            if cached: self.send_json(cached); return
-            data = parse_downloads(run_amulecmd("show dl"))
-            cache_set("downloads", data)
-            self.send_json(data)
+            raw = run_amulecmd("show dl")
+            data = parse_downloads(raw)
+            # Don't cache too aggressively during transfers
+            cache_set("downloads", {"downloads": data, "raw": raw})
+            self.send_json({"downloads": data, "raw": raw, "count": len(data)})
 
         elif path == "/api/search":
             query = qs.get("q", [""])[0]
