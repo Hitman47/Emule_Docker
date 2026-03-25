@@ -5,33 +5,35 @@ LABEL description="aMule for ZimaOS - Dashboard, Search, Auto-Organize"
 
 WORKDIR /home/amule
 
-# Use edge main/community plus tagged edge/testing because aMule is packaged in testing.
-RUN printf '%s\n' \
-    'https://dl-cdn.alpinelinux.org/alpine/edge/main' \
-    'https://dl-cdn.alpinelinux.org/alpine/edge/community' \
-    '@testing https://dl-cdn.alpinelinux.org/alpine/edge/testing' \
-    > /etc/apk/repositories \
-    && apk add --no-cache \
+# Install base runtime tools from the default edge repos first.
+# Then install aMule explicitly from edge/testing with direct repository flags.
+# This is more robust than rewriting /etc/apk/repositories and avoids the
+# stable/edge mixing problem from the original Dockerfile.
+RUN set -eux; \
+    apk add --no-cache \
         ca-certificates \
         curl \
         inotify-tools \
         jq \
-        mandoc \
         pwgen \
         python3 \
-        py3-pip \
         tzdata \
         unzip \
-        wget \
-        amule@testing \
-    && update-ca-certificates
+        wget; \
+    update-ca-certificates; \
+    apk add --no-cache \
+        --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main \
+        --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community \
+        --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing \
+        amule
 
 # Install AmuleWebUI-Reloaded
-RUN AMULEWEBUI_RELOADED_COMMIT=704ae1c861561513c010353320bb1ca9f0f2b9fe && \
-    cd /usr/share/amule/webserver && \
-    wget -O AmuleWebUI-Reloaded.zip "https://github.com/MatteoRagni/AmuleWebUI-Reloaded/archive/${AMULEWEBUI_RELOADED_COMMIT}.zip" && \
-    unzip -q AmuleWebUI-Reloaded.zip && \
-    mv AmuleWebUI-Reloaded-* AmuleWebUI-Reloaded && \
+RUN set -eux; \
+    AMULEWEBUI_RELOADED_COMMIT=704ae1c861561513c010353320bb1ca9f0f2b9fe; \
+    cd /usr/share/amule/webserver; \
+    wget -O AmuleWebUI-Reloaded.zip "https://github.com/MatteoRagni/AmuleWebUI-Reloaded/archive/${AMULEWEBUI_RELOADED_COMMIT}.zip"; \
+    unzip -q AmuleWebUI-Reloaded.zip; \
+    mv AmuleWebUI-Reloaded-* AmuleWebUI-Reloaded; \
     rm -rf AmuleWebUI-Reloaded.zip AmuleWebUI-Reloaded/doc-images AmuleWebUI-Reloaded/README.md
 
 # Copy application files
