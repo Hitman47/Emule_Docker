@@ -417,7 +417,7 @@ tr:hover{background:var(--bg3)}
   <!-- ══════════════════════════════════════════ -->
   <div class="panel" id="panel-downloads">
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
-      <button class="btn btn-ghost btn-sm" onclick="loadDownloads()">🔄 Rafraîchir</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadDownloads(true)">🔄 Rafraîchir</button>
       <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)" data-requires-write="1">▶ Tout reprendre</button>
       <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)" data-requires-write="1">⏸ Tout pauser</button>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
@@ -691,7 +691,7 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
         <div class="label">🧾 Historique des actions</div>
-        <button class="btn btn-ghost btn-sm" onclick="loadActionHistory()">🔄 Rafraîchir</button>
+        <button class="btn btn-ghost btn-sm" onclick="loadActionHistory(true)">🔄 Rafraîchir</button>
       </div>
       <div id="actionHistorySummary" style="font-size:.78em;color:var(--text3);margin-bottom:8px">Chargement...</div>
       <div id="actionHistoryList"><div class="empty">Chargement...</div></div>
@@ -753,7 +753,7 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
         <div class="label">🔧 Diagnostic connexion</div>
-        <button class="btn btn-ghost btn-sm" onclick="runDebug()">Tester la connexion EC</button>
+        <button class="btn btn-ghost btn-sm" onclick="runDebug(true)">Tester la connexion EC</button>
       </div>
       <div id="debugSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:10px"></div>
       <pre id="debugOutput" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap">Clique sur le bouton pour tester</pre>
@@ -790,21 +790,140 @@ window._filteredDownloads = [];
 window._selectedDownloadHashes = new Set();
 window._currentLogName = 'kad-monitor';
 window._logViewerText = '';
+const UI_STATE_KEY = 'amuleDashboardUiStateV1';
+window._viewDigests = { status: '', downloads: '', actionHistory: '', debug: '' };
+
+function readUiState() {
+  try {
+    const raw = localStorage.getItem(UI_STATE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeUiState(patch = {}) {
+  const current = readUiState();
+  const next = {...current, ...patch};
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(next));
+  } catch {}
+  return next;
+}
+
+function snapshotUiState() {
+  return {
+    activeTab: getActiveTab(),
+    selectedDownloadHash,
+    searchQuery: document.getElementById('searchQuery')?.value || '',
+    searchType: document.getElementById('searchType')?.value || 'kad',
+    resultFilters: {
+      name: document.getElementById('resultNameFilter')?.value || '',
+      ext: document.getElementById('resultExtFilter')?.value || '',
+      minSources: document.getElementById('resultMinSources')?.value || '0',
+      sort: document.getElementById('resultSort')?.value || 'sources_desc',
+    },
+    downloadFilters: {
+      name: document.getElementById('downloadNameFilter')?.value || '',
+      status: document.getElementById('downloadStatusFilter')?.value || 'all',
+      minSizeMb: document.getElementById('downloadMinSizeMb')?.value || '',
+      maxSizeMb: document.getElementById('downloadMaxSizeMb')?.value || '',
+      minSources: document.getElementById('downloadMinSources')?.value || '',
+      minSpeed: document.getElementById('downloadMinSpeed')?.value || '',
+      onlySelected: !!document.getElementById('downloadOnlySelected')?.checked,
+      sort: document.getElementById('downloadSort')?.value || 'speed_desc',
+    },
+    logFilters: {
+      name: document.getElementById('logNameSelect')?.value || window._currentLogName || 'kad-monitor',
+      level: document.getElementById('logLevelFilter')?.value || 'all',
+      contains: document.getElementById('logContains')?.value || '',
+      lines: document.getElementById('logLinesCount')?.value || '120',
+    },
+  };
+}
+
+function persistUiState(extra = {}) {
+  writeUiState({...snapshotUiState(), ...extra});
+}
+
+function restoreUiState() {
+  const state = readUiState();
+  if (state.searchQuery != null) {
+    const el = document.getElementById('searchQuery');
+    if (el) el.value = state.searchQuery;
+  }
+  if (state.searchType) {
+    const el = document.getElementById('searchType');
+    if (el) el.value = state.searchType;
+  }
+  const resultFilters = state.resultFilters || {};
+  const rf = {
+    resultNameFilter: resultFilters.name,
+    resultExtFilter: resultFilters.ext,
+    resultMinSources: resultFilters.minSources,
+    resultSort: resultFilters.sort,
+  };
+  Object.entries(rf).forEach(([id, value]) => {
+    if (value == null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  const downloadFilters = state.downloadFilters || {};
+  const df = {
+    downloadNameFilter: downloadFilters.name,
+    downloadStatusFilter: downloadFilters.status,
+    downloadMinSizeMb: downloadFilters.minSizeMb,
+    downloadMaxSizeMb: downloadFilters.maxSizeMb,
+    downloadMinSources: downloadFilters.minSources,
+    downloadMinSpeed: downloadFilters.minSpeed,
+    downloadSort: downloadFilters.sort,
+  };
+  Object.entries(df).forEach(([id, value]) => {
+    if (value == null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  if (downloadFilters.onlySelected != null) {
+    const el = document.getElementById('downloadOnlySelected');
+    if (el) el.checked = !!downloadFilters.onlySelected;
+  }
+  const logFilters = state.logFilters || {};
+  if (logFilters.name) window._currentLogName = logFilters.name;
+  const lf = {
+    logNameSelect: logFilters.name,
+    logLevelFilter: logFilters.level,
+    logContains: logFilters.contains,
+    logLinesCount: logFilters.lines,
+  };
+  Object.entries(lf).forEach(([id, value]) => {
+    if (value == null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  if (state.selectedDownloadHash) selectedDownloadHash = state.selectedDownloadHash;
+}
+
+function switchTab(tabName, opts = {}) {
+  const {load = true, persist = true} = opts;
+  const tab = document.querySelector(`[data-tab="${tabName}"]`);
+  const panel = document.getElementById('panel-' + tabName);
+  if (!tab || !panel) return;
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  tab.classList.add('active');
+  panel.classList.add('active');
+  if (persist) persistUiState({activeTab: tabName});
+  if (!load) return;
+  if (tabName === 'downloads') loadDownloads(true);
+  if (tabName === 'servers') loadServers();
+  if (tabName === 'files') loadFiles();
+  if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
+  if (tabName === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
+}
 
 // ── Tab navigation ──
 document.querySelectorAll('.tab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById('panel-' + t.dataset.tab).classList.add('active');
-    // Load data for the tab
-    if (t.dataset.tab === 'downloads') loadDownloads();
-    if (t.dataset.tab === 'servers') loadServers();
-    if (t.dataset.tab === 'files') loadFiles();
-    if (t.dataset.tab === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(); runDebug(); showLog(window._currentLogName || 'kad-monitor'); }
-    if (t.dataset.tab === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
-  });
+  t.addEventListener('click', () => switchTab(t.dataset.tab));
 });
 
 // ── API helpers ──
@@ -910,19 +1029,18 @@ function renderSparkline(containerId, data, color) {
 document.addEventListener('keydown', function(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault();
-    // Switch to search tab
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-    document.querySelector('[data-tab="search"]').classList.add('active');
-    document.getElementById('panel-search').classList.add('active');
+    switchTab('search');
     document.getElementById('searchQuery').focus();
   }
 });
 
 // ── Status / Monitoring ──
-async function loadStatus() {
-  const d = await api('/api/status');
+async function loadStatus(force = false) {
+  const digest = !force ? (window._viewDigests.status || '') : '';
+  const d = await api('/api/status' + (digest ? ('?if_digest=' + encodeURIComponent(digest)) : ''));
   if (!d) return;
+  if (d.unchanged) return;
+  if (d.digest) window._viewDigests.status = d.digest;
 
   // ── ED2K pill + banner ──
   const ed2kPill = document.getElementById('pillEd2k');
@@ -1019,7 +1137,7 @@ function readNumberInput(id) {
 }
 
 function getDownloadFilters() {
-  return {
+  const filters = {
     name: (document.getElementById('downloadNameFilter')?.value || '').trim().toLowerCase(),
     status: document.getElementById('downloadStatusFilter')?.value || 'all',
     sort: document.getElementById('downloadSort')?.value || 'speed_desc',
@@ -1029,6 +1147,17 @@ function getDownloadFilters() {
     minSpeed: readNumberInput('downloadMinSpeed'),
     onlySelected: !!document.getElementById('downloadOnlySelected')?.checked,
   };
+  writeUiState({downloadFilters: {
+    name: document.getElementById('downloadNameFilter')?.value || '',
+    status: filters.status,
+    minSizeMb: document.getElementById('downloadMinSizeMb')?.value || '',
+    maxSizeMb: document.getElementById('downloadMaxSizeMb')?.value || '',
+    minSources: document.getElementById('downloadMinSources')?.value || '',
+    minSpeed: document.getElementById('downloadMinSpeed')?.value || '',
+    onlySelected: filters.onlySelected,
+    sort: filters.sort,
+  }});
+  return filters;
 }
 
 function resetDownloadFilters() {
@@ -1047,6 +1176,7 @@ function resetDownloadFilters() {
   });
   const onlySelected = document.getElementById('downloadOnlySelected');
   if (onlySelected) onlySelected.checked = false;
+  persistUiState();
   applyDownloadFilters();
 }
 
@@ -1259,19 +1389,29 @@ function renderDownloadsTable(downloads, summary = {}) {
   container.innerHTML = html;
 }
 
-async function loadDownloads() {
-  const resp = await api('/api/downloads');
+async function loadDownloads(force = false) {
   const container = document.getElementById('downloadsTable');
   const rawEl = document.getElementById('downloadsRaw');
   const refreshInfo = document.getElementById('dlRefreshInfo');
+  const digest = !force ? (window._viewDigests.downloads || '') : '';
+  const qs = [];
+  if (digest) qs.push('if_digest=' + encodeURIComponent(digest));
+  qs.push('include_raw=' + (force ? '1' : '0'));
+  const resp = await api('/api/downloads' + (qs.length ? '?' + qs.join('&') : ''));
 
   if (!resp) {
     container.innerHTML = '<div class="empty">Erreur de communication</div>';
     return;
   }
 
-  if (rawEl) rawEl.textContent = resp.raw || '(vide)';
-  if (refreshInfo) refreshInfo.textContent = 'MAJ: ' + new Date().toLocaleTimeString('fr-FR');
+  if (refreshInfo) {
+    const suffix = resp.unchanged ? ' (inchangé)' : '';
+    refreshInfo.textContent = 'MAJ: ' + new Date().toLocaleTimeString('fr-FR') + suffix;
+  }
+  if (resp.unchanged) return;
+  if (resp.digest) window._viewDigests.downloads = resp.digest;
+
+  if (rawEl && typeof resp.raw === 'string') rawEl.textContent = resp.raw || '(vide)';
 
   const d = resp.downloads || [];
   window._downloadsAll = d.map(item => ({...item, eta: item.eta || item.eta_text || item.etaText || item.eta_estimate || item.eta || '—'}));
@@ -1295,6 +1435,7 @@ async function loadDownloads() {
     if (exists) refreshSelectedDownloadDetail();
     else {
       selectedDownloadHash = '';
+      writeUiState({selectedDownloadHash: ''});
       const box = document.getElementById('downloadDetailBox');
       if (box) box.innerHTML = '<div class="empty" style="padding:18px">Le transfert sélectionné n\'existe plus.</div>';
     }
@@ -1304,6 +1445,7 @@ async function loadDownloads() {
 async function loadDownloadDetail(hash) {
   if (!hash) return;
   selectedDownloadHash = hash;
+  writeUiState({selectedDownloadHash: hash});
   const box = document.getElementById('downloadDetailBox');
   if (box) box.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   const d = await api('/api/download_detail?hash=' + encodeURIComponent(hash));
@@ -1379,6 +1521,7 @@ async function doSearch() {
   const q = document.getElementById('searchQuery').value.trim();
   if (!q) return;
   const type = document.getElementById('searchType').value;
+  writeUiState({searchQuery: q, searchType: type});
   const msg = document.getElementById('searchMsg');
   msg.className = 'msg info show';
   msg.innerHTML = '<div class="spinner"></div> Recherche en cours sur le réseau ' + type.toUpperCase() + '...';
@@ -1409,6 +1552,16 @@ function getResultFilters() {
     minSources: parseInt(document.getElementById('resultMinSources')?.value || '0', 10) || 0,
     sort: document.getElementById('resultSort')?.value || 'sources_desc',
   };
+  writeUiState({
+    searchQuery: document.getElementById('searchQuery')?.value || '',
+    searchType: document.getElementById('searchType')?.value || 'kad',
+    resultFilters: {
+      name: document.getElementById('resultNameFilter')?.value || '',
+      ext: document.getElementById('resultExtFilter')?.value || '',
+      minSources: document.getElementById('resultMinSources')?.value || '0',
+      sort: window._resultFilters.sort,
+    },
+  });
   return window._resultFilters;
 }
 
@@ -1515,11 +1668,7 @@ async function bulkDownloadSelected(btn = null) {
 }
 
 function openDownloadsTab() {
-  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-  document.querySelector('[data-tab="downloads"]').classList.add('active');
-  document.getElementById('panel-downloads').classList.add('active');
-  loadDownloads();
+  switchTab('downloads');
 }
 
 async function downloadResult(id, btn = null, silent = false) {
@@ -1721,6 +1870,7 @@ async function runSavedSearch(searchId) {
   }
   document.getElementById('searchQuery').value = item.query || '';
   document.getElementById('searchType').value = item.type || 'kad';
+  writeUiState({searchQuery: item.query || '', searchType: item.type || 'kad'});
   await doSearch();
   loadSavedSearches();
 }
@@ -2364,8 +2514,10 @@ async function showLog(name = '') {
   const summary = document.getElementById('logSummary');
   const logName = document.getElementById('logNameSelect')?.value || window._currentLogName || 'kad-monitor';
   const level = document.getElementById('logLevelFilter')?.value || 'all';
-  const contains = encodeURIComponent(document.getElementById('logContains')?.value || '');
+  const containsRaw = document.getElementById('logContains')?.value || '';
+  const contains = encodeURIComponent(containsRaw);
   const lines = document.getElementById('logLinesCount')?.value || '120';
+  writeUiState({logFilters: {name: logName, level, contains: containsRaw, lines}});
   viewer.textContent = 'Chargement...';
   if (summary) summary.textContent = 'Chargement du log...';
   const d = await api(`/api/logs?name=${encodeURIComponent(logName)}&level=${encodeURIComponent(level)}&contains=${contains}&lines=${encodeURIComponent(lines)}`);
@@ -2397,22 +2549,31 @@ async function copyLogViewer() {
 }
 
 // ── Action history ──
-async function loadActionHistory() {
+async function loadActionHistory(force = false) {
   const listEl = document.getElementById('actionHistoryList');
   const summaryEl = document.getElementById('actionHistorySummary');
   if (!listEl || !summaryEl) return;
   summaryEl.textContent = 'Chargement...';
-  const d = await api('/api/action_history?limit=20');
+  const digest = !force ? (window._viewDigests.actionHistory || '') : '';
+  const url = '/api/action_history?limit=20' + (digest ? ('&if_digest=' + encodeURIComponent(digest)) : '');
+  const d = await api(url);
+  if (d?.unchanged) {
+    summaryEl.textContent = summaryEl.dataset.lastSummary || 'Aucune action récente';
+    return;
+  }
+  if (d?.digest) window._viewDigests.actionHistory = d.digest;
   const actions = d?.actions || [];
   const limit = d?.limit || appConfig?.action_history_limit || 20;
   if (!actions.length) {
+    summaryEl.dataset.lastSummary = 'Aucune action récente';
     summaryEl.textContent = 'Aucune action récente';
     listEl.innerHTML = '<div class="empty">Aucune action récente</div>';
     return;
   }
   const okCount = actions.filter(a => a.ok).length;
   const confirmedCount = actions.filter(a => a.confirmed).length;
-  summaryEl.textContent = `${actions.length} action(s) récentes / max ${limit} · ${okCount} OK · ${confirmedCount} confirmées`;
+  summaryEl.dataset.lastSummary = `${actions.length} action(s) récentes / max ${limit} · ${okCount} OK · ${confirmedCount} confirmées`;
+  summaryEl.textContent = summaryEl.dataset.lastSummary;
   listEl.innerHTML = '<div style="display:grid;gap:6px">' + actions.map(a => {
     const color = a.ok ? (a.confirmed ? 'var(--green)' : 'var(--orange)') : 'var(--red)';
     const status = a.ok ? (a.confirmed ? 'confirmé' : 'envoyé') : 'échec';
@@ -2429,16 +2590,23 @@ async function loadActionHistory() {
 }
 
 // ── Debug ──
-async function runDebug() {
+async function runDebug(force = false) {
   const summary = document.getElementById('debugSummary');
   const raw = document.getElementById('debugOutput');
   if (raw) raw.textContent = 'Test en cours...';
   if (summary) summary.innerHTML = '';
-  const d = await api('/api/debug');
+  const digest = !force ? (window._viewDigests.debug || '') : '';
+  const d = await api('/api/debug' + (digest ? ('?if_digest=' + encodeURIComponent(digest)) : ''));
   if (!d) {
     if (raw) raw.textContent = 'Erreur de connexion au dashboard';
     return;
   }
+  if (d.unchanged) {
+    if (raw) raw.textContent = raw.dataset.lastText || raw.textContent;
+    if (summary && summary.dataset.lastHtml) summary.innerHTML = summary.dataset.lastHtml;
+    return;
+  }
+  if (d.digest) window._viewDigests.debug = d.digest;
   if (summary) {
     const status = d.status || {};
     const cards = [
@@ -2450,8 +2618,9 @@ async function runDebug() {
       ['Dernière recherche', d.last_search?.query ? `${d.last_search.query} (${d.last_search.results_count || 0})` : 'Aucune'],
     ];
     summary.innerHTML = cards.map(([label, value]) => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px"><div style="font-size:.72em;color:var(--text3);margin-bottom:4px">${esc(label)}</div><div style="font-size:.9em;font-weight:600;word-break:break-word">${esc(value)}</div></div>`).join('');
+    summary.dataset.lastHtml = summary.innerHTML;
   }
-  if (raw) raw.textContent = (appConfig && appConfig.debug_mode === false) ? 'Mode debug étendu désactivé' : JSON.stringify(d, null, 2);
+  if (raw) { raw.textContent = (appConfig && appConfig.debug_mode === false) ? 'Mode debug étendu désactivé' : JSON.stringify(d, null, 2); raw.dataset.lastText = raw.textContent; }
 }
 
 // ── Init & Auto-refresh ──
@@ -2468,18 +2637,44 @@ function restartAutoRefresh() {
     await loadDownloads();
     const tab = getActiveTab();
     if (tab === 'servers') await loadServers();
+    if (tab === 'settings') {
+      await loadActionHistory();
+      await runDebug();
+    }
   }, seconds * 1000);
 }
 
+function bindUiStatePersistence() {
+  const ids = [
+    'searchQuery', 'searchType',
+    'resultNameFilter', 'resultExtFilter', 'resultMinSources', 'resultSort',
+    'downloadNameFilter', 'downloadStatusFilter', 'downloadMinSizeMb', 'downloadMaxSizeMb', 'downloadMinSources', 'downloadMinSpeed', 'downloadOnlySelected', 'downloadSort',
+    'logNameSelect', 'logLevelFilter', 'logContains', 'logLinesCount'
+  ];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const evt = (el.tagName === 'SELECT' || el.type === 'checkbox') ? 'change' : 'input';
+    el.addEventListener(evt, () => persistUiState());
+    if (evt !== 'change') el.addEventListener('change', () => persistUiState());
+  });
+  window.addEventListener('beforeunload', () => persistUiState());
+}
+
 async function init() {
+  restoreUiState();
+  bindUiStatePersistence();
   await loadAppConfig();
-  await loadStatus();
-  await loadDownloads();
+  const saved = readUiState();
+  await loadStatus(true);
+  await loadDownloads(true);
   await loadFiles();
   loadSearchHistory();
   loadFavoritesCount();
   loadStatsChart();
   loadBookmarklet();
+  if (saved.activeTab && saved.activeTab !== 'dashboard') switchTab(saved.activeTab, {load: true, persist: false});
+  else switchTab('dashboard', {load: false, persist: false});
 
   // Auto-refresh: status + downloads always, interval configurable
   restartAutoRefresh();

@@ -89,6 +89,25 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(filtered['counts']['error'], 1)
         self.assertIn('ERROR cannot connect', ''.join(filtered['lines']))
 
+    def test_payload_digest_stable_across_key_order(self):
+        left = {'b': 2, 'a': {'x': 1, 'y': 2}}
+        right = {'a': {'y': 2, 'x': 1}, 'b': 2}
+        self.assertEqual(server.payload_digest(left), server.payload_digest(right))
+
+    def test_build_downloads_payload_can_skip_raw_and_expose_digest(self):
+        raw = "> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA File One.mkv\n  512.0/1024.0 MB  50%\n  Sources: 12\n  128.0 KB/s downloading\n"
+        payload = server.build_downloads_payload(raw=raw, include_raw=False)
+        self.assertEqual(payload['count'], 1)
+        self.assertIn('digest', payload)
+        self.assertNotIn('raw', payload)
+        self.assertEqual(payload['downloads'][0]['eta'], '1h 08m')
+
+    def test_build_action_history_payload_contains_digest(self):
+        server.record_action_event({'action': 'download', 'ok': True, 'confirmed': True, 'code': 'SUCCESS', 'message': 'ok'}, 200)
+        payload = server.build_action_history_payload(limit=10)
+        self.assertEqual(len(payload['actions']), 1)
+        self.assertIn('digest', payload)
+
     def test_import_dashboard_bundle_merge_keeps_uniques(self):
         settings = server.normalize_settings(None)
         settings['dashboard']['refresh_interval_sec'] = 9

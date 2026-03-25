@@ -215,6 +215,24 @@ def cache_clear(*keys):
             _cache.pop(key, None)
 
 
+def stable_json_dumps(data):
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def payload_digest(data):
+    try:
+        blob = stable_json_dumps(data)
+    except Exception:
+        blob = repr(data)
+    return hashlib.sha1(blob.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def unchanged_payload(digest, **extra):
+    payload = {"ok": True, "unchanged": True, "digest": digest, "generated_at": int(time.time())}
+    payload.update(extra)
+    return payload
+
+
 # ── Action state ──
 _action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel")}
 _last_search_context = {"query": "", "type": "kad", "results": [], "timestamp": 0}
@@ -1029,6 +1047,64 @@ def summarize_downloads(downloads):
         summary["avg_progress"] = round(sum(progress_values) / len(progress_values), 1)
     summary["total_speed"] = round(summary["total_speed"], 1)
     return summary
+
+
+def build_status_payload(raw=None):
+    data = parse_status(raw if raw is not None else run_amulecmd("status"))
+    data["disk"] = get_disk_info()
+    digest_data = {
+        "ed2k_status": data.get("ed2k_status"),
+        "ed2k_server": data.get("ed2k_server"),
+        "kad_status": data.get("kad_status"),
+        "download_speed": data.get("download_speed"),
+        "upload_speed": data.get("upload_speed"),
+        "queue_length": data.get("queue_length"),
+        "shared_files": data.get("shared_files"),
+        "clients_in_queue": data.get("clients_in_queue"),
+        "total_sources": data.get("total_sources"),
+        "disk": data.get("disk"),
+    }
+    data["digest"] = payload_digest(digest_data)
+    data["generated_at"] = int(time.time())
+    return data
+
+
+def build_downloads_payload(raw=None, include_raw=True):
+    raw = raw if raw is not None else run_amulecmd("show dl")
+    data = parse_downloads(raw)
+    for item in data:
+        item["eta"] = estimate_eta_text(item)
+    summary = summarize_downloads(data)
+    digest_items = [{
+        "hash": item.get("hash"),
+        "name": item.get("name"),
+        "progress": item.get("progress"),
+        "speed": item.get("speed"),
+        "sources": item.get("sources"),
+        "status": item.get("status"),
+        "size_bytes": item.get("size_bytes"),
+        "eta": item.get("eta"),
+    } for item in data]
+    payload = {
+        "downloads": data,
+        "count": len(data),
+        "summary": summary,
+        "digest": payload_digest({"downloads": digest_items, "summary": summary}),
+        "generated_at": int(time.time()),
+    }
+    if include_raw:
+        payload["raw"] = raw
+    return payload
+
+
+def build_action_history_payload(limit=30):
+    actions = get_action_history(limit)
+    return {
+        "actions": actions,
+        "limit": _action_history.maxlen,
+        "digest": payload_digest(actions),
+        "generated_at": int(time.time()),
+    }
 
 
 def parse_search_results(raw):
@@ -2054,6 +2130,18 @@ def build_debug_snapshot():
         diag["recent_logs"] = list(_log_buffer)[-15:]
     else:
         diag["recent_logs"] = ["Mode debug étendu désactivé"]
+    diag["digest"] = payload_digest({
+        "amuled_running": diag.get("amuled_running"),
+        "port_4712_open": diag.get("port_4712_open"),
+        "status": diag.get("status"),
+        "downloads_count": diag.get("downloads_count"),
+        "download_status_counts": diag.get("download_status_counts"),
+        "action_locks": diag.get("action_locks"),
+        "last_search": diag.get("last_search"),
+        "recent_actions": diag.get("recent_actions"),
+        "dashboard_config": diag.get("dashboard_config"),
+    })
+    diag["generated_at"] = int(time.time())
     return diag
 
 
@@ -2161,25 +2249,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # ── API Routes ──
         if path == "/api/status":
             cached = cache_get("status", 3)
-            if cached: self.send_json(cached); return
-            data = parse_status(run_amulecmd("status"))
-            data["disk"] = get_disk_info()
-            cache_set("status", data)
+            if_digest = qs.get("if_digest", [""])[0]
+            if not cached:
+                cached = build_status_payload()
+                cache_set("status", cached)
             # Record stats snapshot for daily tracking
             try:
-                record_stats_snapshot(data.get("download_speed", 0), data.get("upload_speed", 0))
+                record_stats_snapshot(cached.get("download_speed", 0), cached.get("upload_speed", 0))
             except Exception:
                 pass
-            self.send_json(data)
+            if if_digest and cached.get("digest") == if_digest:
+                self.send_json(unchanged_payload(cached.get("digest"), cached=True))
+                return
+            self.send_json(cached)
 
         elif path == "/api/downloads":
-            raw = run_amulecmd("show dl")
-            data = parse_downloads(raw)
-            for item in data:
-                item["eta"] = estimate_eta_text(item)
-            summary = summarize_downloads(data)
-            cache_set("downloads", {"downloads": data, "raw": raw, "summary": summary})
-            self.send_json({"downloads": data, "raw": raw, "count": len(data), "summary": summary})
+            include_raw = qs.get("include_raw", ["1"])[0] not in ("0", "false", "no")
+            if_digest = qs.get("if_digest", [""])[0]
+            cached = cache_get("downloads", 2)
+            if not cached:
+                cached = build_downloads_payload(include_raw=include_raw)
+                cache_set("downloads", cached)
+            elif include_raw and "raw" not in cached:
+                cached = build_downloads_payload(include_raw=True)
+                cache_set("downloads", cached)
+            if if_digest and cached.get("digest") == if_digest:
+                self.send_json(unchanged_payload(cached.get("digest"), count=cached.get("count", 0), summary=cached.get("summary", {}), cached=True))
+                return
+            if include_raw:
+                self.send_json(cached)
+            else:
+                payload = dict(cached)
+                payload.pop("raw", None)
+                self.send_json(payload)
 
         elif path == "/api/download_detail":
             hash_value = qs.get("hash", [""])[0]
@@ -2357,7 +2459,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/action_history":
             limit = int(qs.get("limit", ["30"])[0] or "30")
-            self.send_json({"actions": get_action_history(limit), "limit": _action_history.maxlen})
+            payload = build_action_history_payload(limit)
+            if_digest = qs.get("if_digest", [""])[0]
+            if if_digest and payload.get("digest") == if_digest:
+                self.send_json(unchanged_payload(payload.get("digest"), limit=payload.get("limit", _action_history.maxlen)))
+            else:
+                self.send_json(payload)
 
         elif path == "/api/app_config":
             self.send_json({"ok": True, "config": get_dashboard_config(), "read_only": is_read_only_enabled()})
@@ -2368,7 +2475,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(build_export_bundle(include_action_history=include_action_history, include_stats=include_stats))
 
         elif path == "/api/debug":
-            self.send_json(build_debug_snapshot())
+            payload = build_debug_snapshot()
+            if_digest = qs.get("if_digest", [""])[0]
+            if if_digest and payload.get("digest") == if_digest:
+                self.send_json(unchanged_payload(payload.get("digest")))
+            else:
+                self.send_json(payload)
 
         elif path == "/api/organize":
             blocked = guard_write_action(self, "organize")
