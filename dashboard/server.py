@@ -338,16 +338,29 @@ def import_server_sources(sources, reconnect=True):
 def _exec_amulecmd(command, password, timeout=15):
     """Low-level amulecmd execution with a specific password."""
     try:
-        result = subprocess.run(
-            ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", password, "-c", command],
-            capture_output=True, text=True, timeout=timeout
-        )
+        cmd = ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", password, "-c", command]
+        _log(f"EXEC: amulecmd -h {EC_HOST} -p {EC_PORT} -P {'***'+password[-4:] if len(password)>4 else '***'} -c {command}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         output = result.stdout + result.stderr
+        _log(f"  RC={result.returncode} | output={output[:200].replace(chr(10),' | ')}")
         return output
     except subprocess.TimeoutExpired:
+        _log(f"  TIMEOUT after {timeout}s")
         return "ERROR: timeout"
     except Exception as e:
+        _log(f"  EXCEPTION: {e}")
         return f"ERROR: {e}"
+
+
+# ── Logging ring buffer (last 50 entries, visible in /api/debug) ──
+import collections
+_log_buffer = collections.deque(maxlen=50)
+
+def _log(msg):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    _log_buffer.append(line)
+    print(f"[DASHBOARD] {line}", flush=True)
 
 
 def _clean_amulecmd_output(output):
@@ -366,46 +379,65 @@ def _clean_amulecmd_output(output):
 
 
 def run_amulecmd(command, timeout=15):
-    """Execute amulecmd with auto-detection of password mode (plain vs hash).
+    """Execute amulecmd with auto-detection of password mode.
 
-    On first call, tries plain text password. If auth fails and we have a hash,
-    tries the hash. Caches which mode works for subsequent calls.
+    Tries: plain password → computed hash → hash from amule.conf.
+    Caches which mode works.
     """
     global _password_mode
 
-    # Determine password order to try
+    # Build password candidates
     if _password_mode == "plain":
-        passwords = [EC_PASSWORD]
+        passwords = [(EC_PASSWORD, "plain")]
     elif _password_mode == "hash":
-        passwords = [EC_PASSWORD_HASH]
+        passwords = [(EC_PASSWORD_HASH, "hash")]
+    elif _password_mode == "conf_hash":
+        passwords = [(_conf_ec_hash, "conf_hash")]
     else:
-        # Not yet determined — try plain first, then hash
-        passwords = [EC_PASSWORD]
+        passwords = []
+        if EC_PASSWORD:
+            passwords.append((EC_PASSWORD, "plain"))
         if EC_PASSWORD_HASH and EC_PASSWORD_HASH != EC_PASSWORD:
-            passwords.append(EC_PASSWORD_HASH)
+            passwords.append((EC_PASSWORD_HASH, "hash"))
+        # Also try hash read from amule.conf
+        if _conf_ec_hash and _conf_ec_hash not in (EC_PASSWORD, EC_PASSWORD_HASH):
+            passwords.append((_conf_ec_hash, "conf_hash"))
 
-    for i, pwd in enumerate(passwords):
+    for i, (pwd, mode) in enumerate(passwords):
         if not pwd:
             continue
         output = _exec_amulecmd(command, pwd, timeout)
 
-        # Check for auth failure
         if "Authentication failed" in output or "wrong password" in output.lower():
             if i < len(passwords) - 1:
-                continue  # Try next password
-            # All passwords failed
+                _log(f"  Auth failed with mode={mode}, trying next...")
+                continue
             return _clean_amulecmd_output(output)
 
-        # Success (or other error like "not connected") — remember which password worked
-        if "Authentication failed" not in output:
-            if _password_mode is None:
-                mode = "plain" if pwd == EC_PASSWORD else "hash"
-                _password_mode = mode
-                print(f"[DASHBOARD] amulecmd password mode: {mode}")
+        # Success — remember mode
+        if _password_mode is None and "Unable to connect" not in output:
+            _password_mode = mode
+            _log(f"PASSWORD MODE LOCKED: {mode}")
 
         return _clean_amulecmd_output(output)
 
     return "ERROR: no password configured"
+
+
+# ── Read ECPassword hash from amule.conf at startup ──
+_conf_ec_hash = ""
+_amule_conf_path = os.path.join(AMULE_HOME, "amule.conf")
+try:
+    with open(_amule_conf_path) as _f:
+        for _line in _f:
+            if _line.strip().startswith("ECPassword="):
+                _conf_ec_hash = _line.strip().split("=", 1)[1]
+                print(f"[DASHBOARD] Read ECPassword from amule.conf: {_conf_ec_hash[:10]}...")
+                break
+except FileNotFoundError:
+    print(f"[DASHBOARD] amule.conf not found at {_amule_conf_path}")
+except Exception as _e:
+    print(f"[DASHBOARD] Error reading amule.conf: {_e}")
 
 
 def parse_status(raw):
@@ -651,21 +683,89 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"raw": run_amulecmd("statistics")})
 
         elif path == "/api/debug":
-            # Diagnostic endpoint — shows password mode and connection test
-            test_output = run_amulecmd("status", timeout=8)
-            auth_ok = "Authentication failed" not in test_output and "wrong password" not in test_output.lower()
-            self.send_json({
-                "ec_host": EC_HOST,
-                "ec_port": EC_PORT,
-                "password_mode": _password_mode or "not yet determined",
-                "password_plain_set": bool(EC_PASSWORD),
-                "password_hash_set": bool(EC_PASSWORD_HASH),
-                "password_plain_preview": EC_PASSWORD[:3] + "***" if EC_PASSWORD else "(empty)",
-                "password_hash_preview": EC_PASSWORD_HASH[:8] + "..." if EC_PASSWORD_HASH else "(empty)",
-                "cred_file_exists": os.path.isfile(_cred_file),
-                "auth_ok": auth_ok,
-                "test_output": test_output[:500],
-            })
+            diag = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+            # 1. Is amuled running?
+            try:
+                ps = subprocess.run(["pgrep", "-x", "amuled"], capture_output=True, text=True, timeout=5)
+                diag["amuled_running"] = ps.returncode == 0
+                diag["amuled_pid"] = ps.stdout.strip() or None
+            except Exception as e:
+                diag["amuled_running"] = f"check failed: {e}"
+
+            # 2. Is port 4712 listening?
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(3)
+                result_conn = s.connect_ex(("localhost", int(EC_PORT)))
+                s.close()
+                diag["port_4712_open"] = result_conn == 0
+                diag["port_4712_errno"] = result_conn
+            except Exception as e:
+                diag["port_4712_open"] = f"check failed: {e}"
+
+            # Also try 127.0.0.1
+            try:
+                import socket
+                s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s2.settimeout(3)
+                r2 = s2.connect_ex(("127.0.0.1", int(EC_PORT)))
+                s2.close()
+                diag["port_4712_open_127"] = r2 == 0
+            except Exception:
+                pass
+
+            # 3. Passwords configured
+            diag["ec_host"] = EC_HOST
+            diag["ec_port"] = EC_PORT
+            diag["password_plain"] = EC_PASSWORD[:3] + "***" + EC_PASSWORD[-2:] if len(EC_PASSWORD) > 5 else repr(EC_PASSWORD)
+            diag["password_hash"] = EC_PASSWORD_HASH[:10] + "..." if EC_PASSWORD_HASH else "(empty)"
+            diag["password_mode_detected"] = _password_mode or "not yet"
+            diag["cred_file"] = _cred_file
+            diag["cred_file_exists"] = os.path.isfile(_cred_file)
+
+            # 4. Read what amule.conf says the ECPassword should be
+            amule_conf = os.path.join(AMULE_HOME, "amule.conf")
+            diag["amule_conf_exists"] = os.path.isfile(amule_conf)
+            if os.path.isfile(amule_conf):
+                try:
+                    with open(amule_conf) as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("ECPassword="):
+                                conf_hash = line.split("=", 1)[1]
+                                diag["amule_conf_ECPassword"] = conf_hash
+                                diag["our_hash_matches_conf"] = (EC_PASSWORD_HASH == conf_hash)
+                                # Also check: maybe amulecmd needs the hash that's IN the conf
+                                if not diag.get("our_hash_matches_conf"):
+                                    diag["MISMATCH_DETAIL"] = f"amule.conf has '{conf_hash}' but we computed '{EC_PASSWORD_HASH}'"
+                                break
+                except Exception as e:
+                    diag["amule_conf_read_error"] = str(e)
+
+            # 5. Try raw amulecmd with plain password
+            raw_plain = _exec_amulecmd("status", EC_PASSWORD, timeout=8) if EC_PASSWORD else "(no plain pwd)"
+            diag["test_plain"] = raw_plain[:400]
+            diag["test_plain_auth_ok"] = "Authentication failed" not in str(raw_plain)
+
+            # 6. Try raw amulecmd with hash
+            if EC_PASSWORD_HASH:
+                raw_hash = _exec_amulecmd("status", EC_PASSWORD_HASH, timeout=8)
+                diag["test_hash"] = raw_hash[:400]
+                diag["test_hash_auth_ok"] = "Authentication failed" not in str(raw_hash)
+
+            # 7. Try with the hash FROM amule.conf directly
+            conf_hash = diag.get("amule_conf_ECPassword", "")
+            if conf_hash and conf_hash != EC_PASSWORD_HASH and conf_hash != EC_PASSWORD:
+                raw_conf = _exec_amulecmd("status", conf_hash, timeout=8)
+                diag["test_conf_hash"] = raw_conf[:400]
+                diag["test_conf_hash_auth_ok"] = "Authentication failed" not in str(raw_conf)
+
+            # 8. Recent dashboard logs
+            diag["recent_logs"] = list(_log_buffer)[-15:]
+
+            self.send_json(diag)
 
         elif path == "/api/organize":
             try:
