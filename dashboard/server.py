@@ -474,8 +474,8 @@ def parse_status(raw):
                     info["ed2k_id_type"] = "Low ID"
                 else:
                     info["ed2k_status"] = "connected"
-                # Try to extract server name: "Connected to ServerName (ip:port)"
-                m = re.search(r'connected\s+to\s+(.+?)(?:\s*\(|$)', orig, re.I)
+                # Extract server name: "Connected to ServerName [ip:port]" or "(ip:port)"
+                m = re.search(r'connected\s+to\s+(.+?)(?:\s*[\[\(]|$)', orig, re.I)
                 if m:
                     info["ed2k_server"] = m.group(1).strip()
 
@@ -533,70 +533,104 @@ def parse_status(raw):
 
 
 def parse_downloads(raw):
+    """Parse amulecmd 'show dl' output.
+    
+    Debian amulecmd 2.3.3 format:
+      > HASH Filename
+        subsequent lines with size, progress, sources, speed, status
+    
+    A new download entry is ONLY started by a line matching "> [32-hex-hash] name".
+    All other lines are attributes of the current download.
+    """
     downloads = []
     current = None
+
     for line in raw.split("\n"):
-        line = line.strip()
-        if not line:
+        stripped = line.strip()
+        if not stripped:
             continue
 
-        # New download entry: "> filename" or "N) filename"
-        if line.startswith(">") or re.match(r'^\d+\)', line):
+        # ── New download: "> HASH Filename" ──
+        # Match: optional ">", then 32 hex chars, then filename
+        m_entry = re.match(r'^>?\s*([0-9A-Fa-f]{32})\s+(.+)', stripped)
+        if m_entry:
             if current:
                 downloads.append(current)
-            name = re.sub(r'^[>\d\)\s]+', '', line).strip()
-            current = {"name": name, "size": "", "progress": 0, "speed": 0,
-                        "sources": 0, "status": "unknown", "hash": ""}
-        elif current:
-            ll = line.lower()
-            # Size - multiple formats
-            if "size" in ll:
-                m = re.search(r'([\d.]+\s*[KMGT]?i?B)', line, re.I)
-                if m:
-                    current["size"] = m.group(1)
-            # Progress percentage
-            if "%" in line:
-                m = re.search(r'([\d.]+)\s*%', line)
-                if m:
-                    current["progress"] = float(m.group(1))
-            # "Done: X / Y" format
-            if "done" in ll:
-                m = re.search(r'done.*?([\d.]+)\s*/\s*([\d.]+)', ll)
-                if m:
-                    try:
-                        done = float(m.group(1))
-                        total = float(m.group(2))
-                        if total > 0:
-                            current["progress"] = round(done / total * 100, 1)
-                    except ValueError:
-                        pass
-            # Sources
-            if "source" in ll:
-                m = re.search(r'(\d+)\s*(?:source|src)', ll)
-                if m:
-                    current["sources"] = int(m.group(1))
-            # Speed - multiple formats
-            if "kb/s" in ll or "bytes/s" in ll or "speed" in ll:
-                m = re.search(r'([\d.]+)\s*kb/s', ll)
-                if m:
-                    current["speed"] = float(m.group(1))
-                else:
-                    m2 = re.search(r'([\d.]+)\s*bytes/s', ll)
-                    if m2:
-                        current["speed"] = float(m2.group(1)) / 1024
-            # Hash
-            if re.match(r'^[0-9a-f]{32}$', line):
-                current["hash"] = line
-            # Status keywords
-            for st in ["downloading", "paused", "waiting", "completing",
-                        "complete", "hashing", "error", "stopped",
-                        "getting sources", "allocating"]:
-                if st in ll:
-                    current["status"] = st
-                    break
+            current = {
+                "name": m_entry.group(2).strip(),
+                "hash": m_entry.group(1),
+                "size": "",
+                "progress": 0,
+                "speed": 0,
+                "sources": 0,
+                "status": "queued"
+            }
+            continue
+
+        # ── Attribute lines (everything else goes to current download) ──
+        if not current:
+            continue
+
+        # Remove leading "> " or ">" from attribute lines
+        attr = re.sub(r'^>\s*', '', stripped)
+        al = attr.lower()
+
+        # Progress: "28.2%" or "28.2 %"
+        m_pct = re.search(r'([\d.]+)\s*%', attr)
+        if m_pct:
+            current["progress"] = float(m_pct.group(1))
+
+        # Size: "34.5/122.3 MB" or "34.5 MB / 122.3 MB" or "Size: 122.3 MB"
+        m_frac = re.search(r'([\d.]+)\s*/\s*([\d.]+)\s*([KMGT]?i?[Bb])', attr)
+        if m_frac:
+            current["size"] = f"{m_frac.group(2)} {m_frac.group(3)}"
+            # Also compute progress if not already set
+            if current["progress"] == 0:
+                try:
+                    done = float(m_frac.group(1))
+                    total = float(m_frac.group(2))
+                    if total > 0:
+                        current["progress"] = round(done / total * 100, 1)
+                except ValueError:
+                    pass
+        elif not current["size"]:
+            m_size = re.search(r'([\d.]+)\s*([KMGT]i?[Bb])', attr)
+            if m_size:
+                current["size"] = f"{m_size.group(1)} {m_size.group(2)}"
+
+        # Sources: "3 source(s)" or "Sources: 3" or "3 src"
+        m_src = re.search(r'(\d+)\s*(?:source|src)', al)
+        if m_src:
+            current["sources"] = int(m_src.group(1))
+        if not m_src:
+            m_src2 = re.search(r'sources?:\s*(\d+)', al)
+            if m_src2:
+                current["sources"] = int(m_src2.group(1))
+
+        # Speed
+        m_spd = re.search(r'([\d.]+)\s*[kK][bB]/s', attr)
+        if m_spd:
+            current["speed"] = float(m_spd.group(1))
+        else:
+            m_spd2 = re.search(r'([\d.]+)\s*[Bb]ytes/s', attr)
+            if m_spd2:
+                current["speed"] = round(float(m_spd2.group(1)) / 1024, 2)
+
+        # Status keywords
+        for st in ["downloading", "paused", "waiting", "completing",
+                    "complete", "hashing", "error", "stopped",
+                    "getting sources", "allocating", "connecting", "queued"]:
+            if st in al:
+                current["status"] = st
+                break
 
     if current:
         downloads.append(current)
+
+    _log(f"parse_downloads: {len(downloads)} downloads parsed")
+    for i, dl in enumerate(downloads[:5]):
+        _log(f"  [{i}] {dl['name'][:50]}... | {dl['progress']:.1f}% | {dl['status']} | src={dl['sources']}")
+
     return downloads
 
 

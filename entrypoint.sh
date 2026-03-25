@@ -541,9 +541,8 @@ start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
-# Auto-connect ED2K + Kad with retry loop (background)
+# Auto-connect ED2K + Kad (background)
 (
-    # Determine which password works
     _try_cmd() {
         OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "$1" 2>&1)
         if echo "$OUT" | grep -qi "wrong password\|Authentication failed"; then
@@ -552,52 +551,59 @@ printf "\n[AMULE] Démarrage d'aMule...\n\n"
         echo "$OUT"
     }
 
-    # Wait for amuled EC port to be ready
-    printf "[AUTO-CONNECT] Attente du démarrage d'amuled...\n"
+    # Wait for amuled EC port
+    printf "[AUTO-CONNECT] Attente du port EC...\n"
     for i in $(seq 1 30); do
         if nc -z localhost 4712 2>/dev/null; then
-            printf "[AUTO-CONNECT] Port EC prêt après %ds\n" "$i"
+            printf "[AUTO-CONNECT] Port EC prêt (%ds)\n" "$i"
             break
         fi
         sleep 1
     done
     sleep 3
 
-    # Import server lists first
+    # Import servers
     printf "[AUTO-CONNECT] Import des serveurs...\n"
     _try_cmd "add ed2k://|serverlist|http://upd.emule-security.org/server.met|/" >/dev/null 2>&1
     _try_cmd "add ed2k://|serverlist|http://edk.peerates.net/servers/best/server.met|/" >/dev/null 2>&1
     sleep 2
 
     # Connect Kad
-    printf "[AUTO-CONNECT] Connexion Kad...\n"
     _try_cmd "connect kad" >/dev/null 2>&1
 
-    # Retry ED2K connection every 30s for 5 minutes
+    # ED2K: smart retry — don't re-send connect if already connecting
     MAX_RETRIES=10
     RETRY=0
+    LAST_STATE="unknown"
     while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
         RETRY=$((RETRY + 1))
-        printf "[AUTO-CONNECT] Tentative ED2K %d/%d...\n" "$RETRY" "$MAX_RETRIES"
-
-        _try_cmd "connect ed2k" >/dev/null 2>&1
-        sleep 8
 
         STATUS=$(_try_cmd "status")
-        if echo "$STATUS" | grep -qi "ed2k.*connected" && ! echo "$STATUS" | grep -qi "not connected"; then
-            printf "[AUTO-CONNECT] ED2K connecté !\n"
-            printf "[AUTO-CONNECT] %s\n" "$(echo "$STATUS" | grep -i ed2k | head -1)"
+        ED2K_LINE=$(echo "$STATUS" | grep -i "ed2k\|edonkey" | head -1)
+
+        # Already connected?
+        if echo "$ED2K_LINE" | grep -qi "connected.*lowid\|connected.*highid\|connected to"; then
+            printf "[AUTO-CONNECT] ED2K connecté ! %s\n" "$(echo "$ED2K_LINE" | tr -d '>')"
             break
         fi
 
-        printf "[AUTO-CONNECT] ED2K pas encore connecté, nouvel essai dans 30s...\n"
-        printf "[AUTO-CONNECT] Status: %s\n" "$(echo "$STATUS" | grep -i "ed2k\|kad" | head -2 | tr '\n' ' ')"
-        sleep 30
+        # Currently connecting? Just wait, don't send another connect
+        if echo "$ED2K_LINE" | grep -qi "now connecting\|connecting"; then
+            printf "[AUTO-CONNECT] ED2K en cours de connexion, attente... (%d/%d)\n" "$RETRY" "$MAX_RETRIES"
+            sleep 15
+            continue
+        fi
+
+        # Truly disconnected — send connect
+        printf "[AUTO-CONNECT] ED2K déconnecté, envoi connect... (%d/%d)\n" "$RETRY" "$MAX_RETRIES"
+        _try_cmd "connect ed2k" >/dev/null 2>&1
+        sleep 15
     done
 
     if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
-        printf "[AUTO-CONNECT] ED2K: échec après %d tentatives. Vérifiez les logs.\n" "$MAX_RETRIES"
+        printf "[AUTO-CONNECT] ED2K: pas connecté après %d essais\n" "$MAX_RETRIES"
     fi
+    printf "[AUTO-CONNECT] Terminé\n"
 ) &
 
 while true; do
