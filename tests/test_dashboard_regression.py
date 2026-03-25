@@ -46,6 +46,37 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(len(links), 2)
         self.assertTrue(all(link.startswith('ed2k://') for link in links))
 
+
+    def test_parse_downloads_exposes_size_metrics(self):
+        raw = '''> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA File One.mkv
+  512.0/1024.0 MB  50%
+  Sources: 12
+  128.0 KB/s downloading
+'''
+        downloads = server.parse_downloads(raw)
+        self.assertEqual(len(downloads), 1)
+        self.assertEqual(downloads[0]['size'], '1024.0 MB')
+        self.assertIsInstance(downloads[0]['size_bytes'], int)
+        self.assertGreater(downloads[0]['size_bytes'], 0)
+        self.assertAlmostEqual(downloads[0]['size_mb'], 1024.0, places=1)
+
+    def test_summarize_transfer_action_results_groups_codes_and_hashes(self):
+        results = [
+            {'hash': 'A'*32, 'name': 'One', 'code': 'SUCCESS', 'message': 'ok', 'before_status': 'downloading', 'after_status': 'paused', 'confirmed': True, 'ok': True},
+            {'hash': 'B'*32, 'name': 'Two', 'code': 'ALREADY_EXISTS', 'message': 'already', 'before_status': 'paused', 'after_status': 'paused', 'confirmed': True, 'ok': True},
+            {'hash': 'C'*32, 'name': 'Three', 'code': 'STATE_NOT_CONFIRMED', 'message': 'bad', 'before_status': 'downloading', 'after_status': 'downloading', 'confirmed': False, 'ok': False},
+            {'hash': 'D'*32, 'name': 'Four', 'code': 'TRANSFER_NOT_FOUND', 'message': 'missing', 'confirmed': False, 'ok': False},
+        ]
+        overview = server.summarize_transfer_action_results(results)
+        self.assertEqual(overview['counts_by_code']['SUCCESS'], 1)
+        self.assertEqual(overview['counts_by_code']['ALREADY_EXISTS'], 1)
+        self.assertEqual(overview['counts_by_code']['STATE_NOT_CONFIRMED'], 1)
+        self.assertIn('A'*32, overview['confirmed_hashes'])
+        self.assertIn('C'*32, overview['failed_hashes'])
+        self.assertIn('D'*32, overview['missing_hashes'])
+        self.assertEqual(overview['status_before']['downloading'], 2)
+        self.assertEqual(len(overview['failed_items']), 2)
+
     def test_filter_log_lines_applies_level_and_text(self):
         lines = [
             'INFO boot complete\n',

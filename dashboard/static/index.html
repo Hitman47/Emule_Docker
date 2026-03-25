@@ -446,20 +446,48 @@ tr:hover{background:var(--bg3)}
             <option value="speed_desc">Vitesse ↓</option>
             <option value="progress_desc">Progression ↓</option>
             <option value="sources_desc">Sources ↓</option>
+            <option value="size_desc">Taille ↓</option>
             <option value="name_asc">Nom A→Z</option>
             <option value="status_asc">État A→Z</option>
           </select>
         </div>
       </div>
+      <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;align-items:end;margin-top:10px">
+        <div>
+          <div class="label" style="margin-bottom:4px">Taille min (MB)</div>
+          <input type="number" id="downloadMinSizeMb" min="0" step="1" value="0" oninput="applyDownloadFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Taille max (MB)</div>
+          <input type="number" id="downloadMaxSizeMb" min="0" step="1" value="0" oninput="applyDownloadFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Sources min</div>
+          <input type="number" id="downloadMinSources" min="0" step="1" value="0" oninput="applyDownloadFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Vitesse min (KB/s)</div>
+          <input type="number" id="downloadMinSpeed" min="0" step="0.1" value="0" oninput="applyDownloadFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Options</div>
+          <label style="display:flex;align-items:center;gap:8px;height:40px;padding:0 10px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02)">
+            <input type="checkbox" id="downloadOnlySelected" onchange="applyDownloadFilters()">
+            <span style="font-size:.82em;color:var(--text2)">Uniquement sélectionnés</span>
+          </label>
+        </div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
         <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(true)">☑ Sélectionner affichés</button>
         <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(false)">☐ Désélectionner</button>
+        <button class="btn btn-ghost btn-sm" onclick="resetDownloadFilters()">↺ Réinitialiser filtres</button>
         <button class="btn btn-ghost btn-sm" onclick="handleSelectedTransferAction('pause', this)" data-requires-write="1">⏸ Pause sélection</button>
         <button class="btn btn-green btn-sm" onclick="handleSelectedTransferAction('resume', this)" data-requires-write="1">▶ Reprendre sélection</button>
         <button class="btn btn-red btn-sm" onclick="handleSelectedTransferAction('cancel', this)" data-requires-write="1">✕ Supprimer sélection</button>
         <span id="downloadFiltersInfo" style="font-size:.76em;color:var(--text3);margin-left:auto">Aucun transfert</span>
       </div>
       <div id="downloadsSummaryCards" class="detail-grid" style="margin-top:12px"></div>
+      <div id="transferActionReport" class="card" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--border)"></div>
     </div>
     <div id="downloadsTable">
       <div class="loading"><div class="spinner"></div></div>
@@ -984,12 +1012,125 @@ function updateDisk(id, info) {
 }
 
 // ── Downloads ──
+function readNumberInput(id) {
+  const raw = document.getElementById(id)?.value ?? '';
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function getDownloadFilters() {
   return {
     name: (document.getElementById('downloadNameFilter')?.value || '').trim().toLowerCase(),
     status: document.getElementById('downloadStatusFilter')?.value || 'all',
     sort: document.getElementById('downloadSort')?.value || 'speed_desc',
+    minSizeMb: readNumberInput('downloadMinSizeMb'),
+    maxSizeMb: readNumberInput('downloadMaxSizeMb'),
+    minSources: readNumberInput('downloadMinSources'),
+    minSpeed: readNumberInput('downloadMinSpeed'),
+    onlySelected: !!document.getElementById('downloadOnlySelected')?.checked,
   };
+}
+
+function resetDownloadFilters() {
+  const defaults = {
+    downloadNameFilter: '',
+    downloadStatusFilter: 'all',
+    downloadSort: 'speed_desc',
+    downloadMinSizeMb: '0',
+    downloadMaxSizeMb: '0',
+    downloadMinSources: '0',
+    downloadMinSpeed: '0',
+  };
+  Object.entries(defaults).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  const onlySelected = document.getElementById('downloadOnlySelected');
+  if (onlySelected) onlySelected.checked = false;
+  applyDownloadFilters();
+}
+
+function getDownloadByHash(hash) {
+  return (window._downloadsAll || []).find(dl => dl.hash === hash) || null;
+}
+
+function buildTransferSelectionSummary(action, hashes) {
+  const rows = (hashes || []).map(hash => getDownloadByHash(hash)).filter(Boolean);
+  const counts = {};
+  rows.forEach(dl => {
+    const key = String(dl.status || 'unknown');
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const countParts = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v} ${k}`);
+  const names = rows.slice(0, 5).map(dl => `• ${dl.name}`);
+  const lines = [];
+  const actionLabel = action === 'cancel' ? 'supprimer' : action === 'pause' ? 'mettre en pause' : 'reprendre';
+  lines.push(`Confirmer ${actionLabel} ${hashes.length} transfert(s) ?`);
+  if (countParts.length) lines.push('', `Répartition : ${countParts.join(', ')}`);
+  if (names.length) {
+    lines.push('', 'Exemples :', ...names);
+    if (rows.length > names.length) lines.push(`… et ${rows.length - names.length} autre(s)`);
+  }
+  return lines.join('\n');
+}
+
+function renderTransferActionReport(resp, action = '') {
+  const box = document.getElementById('transferActionReport');
+  if (!box) return;
+  if (!resp) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const data = resp.data || {};
+  const overview = data.overview || {};
+  const counts = overview.counts_by_code || {[resp.code || 'UNKNOWN']: 1};
+  const chips = [];
+  const addChip = (label, value) => chips.push(`<div class="detail-chip"><div class="k">${esc(String(label))}</div><div class="v">${esc(String(value))}</div></div>`);
+  if (data.summary) {
+    addChip('Cibles', data.summary.total ?? 0);
+    addChip('Confirmés', data.summary.success ?? 0);
+    addChip('Déjà OK', data.summary.already ?? 0);
+    addChip('Échecs', data.summary.failed ?? 0);
+    addChip('Introuvables', data.summary.missing ?? 0);
+  } else {
+    addChip('Code', resp.code || 'UNKNOWN');
+    addChip('Confirmé', resp.confirmed ? 'Oui' : 'Non');
+  }
+  Object.entries(counts).slice(0, 4).forEach(([code, value]) => addChip(code, value));
+
+  let items = [];
+  if (Array.isArray(data.results) && data.results.length) items = data.results;
+  else {
+    const dl = data.download || getDownloadByHash(data.hash || '');
+    items = [{
+      hash: data.hash || dl?.hash || '',
+      name: dl?.name || '',
+      code: resp.code || 'UNKNOWN',
+      message: resp.message || '',
+      before_status: dl?.status || '',
+      after_status: data.download?.status || dl?.status || '',
+      confirmed: !!resp.confirmed,
+      ok: !!resp.ok,
+    }];
+  }
+  const focusItems = items.filter(item => ['STATE_NOT_CONFIRMED', 'TRANSFER_NOT_FOUND', 'COMMAND_FAILED', 'TIMEOUT', 'SESSION_ERROR', 'CORE_UNREACHABLE'].includes(String(item.code || ''))).slice(0, 8);
+  const secondaryItems = !focusItems.length ? items.filter(item => item.code === 'ALREADY_EXISTS').slice(0, 6) : [];
+  const rows = (focusItems.length ? focusItems : secondaryItems).map(item => {
+    const fromTo = [item.before_status, item.after_status].filter(Boolean).join(' → ');
+    return `<tr><td>${esc(item.name || item.hash || '—')}</td><td>${esc(item.code || '—')}</td><td>${esc(fromTo || '—')}</td><td>${esc(item.message || '—')}</td></tr>`;
+  }).join('');
+  const table = rows ? `<div class="label" style="margin:10px 0 6px">Détails utiles</div><table><thead><tr><th>Cible</th><th>Code</th><th>État</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table>` : '';
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+      <div style="font-weight:700">Dernière action ${esc(action || resp.action || 'transfert')}</div>
+      <button class="btn btn-ghost btn-sm" onclick="renderTransferActionReport(null)">Masquer</button>
+    </div>
+    <div style="font-size:.84em;color:var(--text2);margin-top:6px">${esc(resp.message || '')}</div>
+    <div class="detail-grid" style="margin-top:10px">${chips.join('')}</div>
+    ${table}
+  `;
 }
 
 function downloadMatchesFilter(dl, statusFilter) {
@@ -1049,14 +1190,23 @@ function applyDownloadFilters() {
   const filters = getDownloadFilters();
   let filtered = all.filter(dl => {
     const name = String(dl?.name || '').toLowerCase();
+    const sizeMb = Number(dl?.size_mb || 0);
+    const sources = Number(dl?.sources || 0);
+    const speed = Number(dl?.speed || 0);
     if (filters.name && !name.includes(filters.name)) return false;
     if (!downloadMatchesFilter(dl, filters.status)) return false;
+    if (filters.minSizeMb > 0 && (!(sizeMb > 0) || sizeMb < filters.minSizeMb)) return false;
+    if (filters.maxSizeMb > 0 && sizeMb > filters.maxSizeMb) return false;
+    if (filters.minSources > 0 && sources < filters.minSources) return false;
+    if (filters.minSpeed > 0 && speed < filters.minSpeed) return false;
+    if (filters.onlySelected && !(window._selectedDownloadHashes?.has(dl.hash))) return false;
     return true;
   });
   const sorters = {
     speed_desc: (a, b) => (b.speed || 0) - (a.speed || 0) || (b.sources || 0) - (a.sources || 0),
     progress_desc: (a, b) => (b.progress || 0) - (a.progress || 0) || (b.speed || 0) - (a.speed || 0),
     sources_desc: (a, b) => (b.sources || 0) - (a.sources || 0) || (b.speed || 0) - (a.speed || 0),
+    size_desc: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0) || (b.sources || 0) - (a.sources || 0),
     name_asc: (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'fr', {sensitivity: 'base'}),
     status_asc: (a, b) => String(a.status || '').localeCompare(String(b.status || ''), 'fr', {sensitivity: 'base'}) || String(a.name || '').localeCompare(String(b.name || ''), 'fr', {sensitivity: 'base'}),
   };
@@ -1199,7 +1349,7 @@ async function handleSelectedTransferAction(action, btn = null) {
     showToast('err', 'Aucun transfert sélectionné');
     return null;
   }
-  if (action === 'cancel' && !confirm(`Supprimer ${hashes.length} transfert(s) sélectionné(s) ?`)) {
+  if (action === 'cancel' && !confirm(buildTransferSelectionSummary(action, hashes))) {
     return null;
   }
   setButtonPending(btn, true, action === 'pause' ? 'Pause...' : action === 'resume' ? 'Reprise...' : 'Suppression...');
@@ -1209,6 +1359,7 @@ async function handleSelectedTransferAction(action, btn = null) {
     body: JSON.stringify({action, hashes}),
   });
   setButtonPending(btn, false);
+  renderTransferActionReport(d, action);
   if (d?.ok) {
     showToast(d.code === 'PARTIAL_SUCCESS' ? 'info' : 'ok', getActionMessage(d, 'Action exécutée'));
     if (action === 'cancel') hashes.forEach(h => window._selectedDownloadHashes.delete(h));
@@ -1393,17 +1544,28 @@ async function downloadResult(id, btn = null, silent = false) {
 
 async function handleTransferAction(action, hash, btn = null) {
   if (!ensureWritable('Cette action transfert')) return null;
+  if (action === 'cancel' && !confirm(buildTransferSelectionSummary(action, [hash]))) return null;
   const endpoint = action === 'cancel' ? '/api/cancel?hash=' : '/api/' + action + '?hash=';
   const labels = {
     pause: 'Pause...',
     resume: 'Reprise...',
     cancel: 'Suppression...',
   };
-  const d = await apiCall(endpoint + encodeURIComponent(hash), {
-    button: btn,
-    pendingText: labels[action] || 'Action...',
-    successRefresh: loadDownloads,
-  });
+  setButtonPending(btn, true, labels[action] || 'Action...');
+  const d = await api(endpoint + encodeURIComponent(hash));
+  setButtonPending(btn, false);
+  renderTransferActionReport(d, action);
+  if (d?.ok) {
+    showToast('ok', getActionMessage(d, 'Commande exécutée'));
+    await loadDownloads();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur inconnue'));
+  }
+  if (getActiveTab() === 'settings') {
+    loadActionHistory();
+    runDebug();
+    loadAppConfig();
+  }
   return d;
 }
 

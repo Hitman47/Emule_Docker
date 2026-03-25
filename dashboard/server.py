@@ -296,6 +296,68 @@ def action_response(action, ok, code, message, confirmed=False, status=None, dat
     return payload, (status or (200 if ok else 409))
 
 
+def compact_transfer_result(item):
+    if not isinstance(item, dict):
+        return {}
+    payload = {
+        "hash": item.get("hash", ""),
+        "name": item.get("name", ""),
+        "code": item.get("code", "UNKNOWN"),
+        "message": item.get("message", ""),
+        "before_status": item.get("before_status", ""),
+        "after_status": item.get("after_status", ""),
+        "confirmed": bool(item.get("confirmed")),
+        "ok": bool(item.get("ok")),
+    }
+    return payload
+
+
+
+def summarize_transfer_action_results(results):
+    overview = {
+        "counts_by_code": {},
+        "confirmed_hashes": [],
+        "failed_hashes": [],
+        "missing_hashes": [],
+        "status_before": {},
+        "status_after": {},
+        "failed_items": [],
+        "already_items": [],
+        "success_items": [],
+    }
+    for raw in results or []:
+        item = compact_transfer_result(raw)
+        code = str(item.get("code") or "UNKNOWN")
+        overview["counts_by_code"][code] = overview["counts_by_code"].get(code, 0) + 1
+        before_status = str(item.get("before_status") or "").strip()
+        after_status = str(item.get("after_status") or "").strip()
+        if before_status:
+            overview["status_before"][before_status] = overview["status_before"].get(before_status, 0) + 1
+        if after_status:
+            overview["status_after"][after_status] = overview["status_after"].get(after_status, 0) + 1
+        hash_value = item.get("hash") or ""
+        if item.get("confirmed") and item.get("ok"):
+            if hash_value:
+                overview["confirmed_hashes"].append(hash_value)
+        elif code == "TRANSFER_NOT_FOUND":
+            if hash_value:
+                overview["missing_hashes"].append(hash_value)
+        else:
+            if hash_value:
+                overview["failed_hashes"].append(hash_value)
+
+        if code in {"STATE_NOT_CONFIRMED", "TRANSFER_NOT_FOUND", "COMMAND_FAILED", "TIMEOUT", "SESSION_ERROR", "CORE_UNREACHABLE"}:
+            overview["failed_items"].append(item)
+        elif code == "ALREADY_EXISTS":
+            overview["already_items"].append(item)
+        elif item.get("ok"):
+            overview["success_items"].append(item)
+
+    for key in ("failed_items", "already_items", "success_items"):
+        overview[key] = overview[key][:12]
+    return overview
+
+
 
 def record_action_event(payload, http_status):
     event = {
@@ -750,6 +812,8 @@ def parse_downloads(raw):
                 "name": m_entry.group(2).strip(),
                 "hash": m_entry.group(1),
                 "size": "",
+                "size_bytes": None,
+                "size_mb": None,
                 "progress": 0,
                 "speed": 0,
                 "sources": 0,
@@ -816,6 +880,14 @@ def parse_downloads(raw):
 
     if current:
         downloads.append(current)
+
+    for item in downloads:
+        try:
+            size_bytes = size_to_bytes(item.get("size", ""))
+        except Exception:
+            size_bytes = None
+        item["size_bytes"] = size_bytes
+        item["size_mb"] = round(size_bytes / (1024 ** 2), 2) if size_bytes else None
 
     _log(f"parse_downloads: {len(downloads)} downloads parsed")
     for i, dl in enumerate(downloads[:5]):
@@ -1744,7 +1816,7 @@ def change_transfer_state(action, hash_value=None):
         if hash_value and any(d.get("hash") == hash_value for d in refreshed):
             return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502, data={"hash": hash_value})
         cache_clear("downloads")
-        return action_response(action, True, "SUCCESS", "Suppression confirmée.", confirmed=True, data={"hash": hash_value} if hash_value else {})
+        return action_response(action, True, "SUCCESS", "Suppression confirmée.", confirmed=True, data={"hash": hash_value, "changed_hashes": [hash_value] if hash_value else [], "removed_hashes": [hash_value] if hash_value else []} if hash_value else {"changed_hashes": [], "removed_hashes": []})
 
     target_states = {"pause": {"paused", "stopped"}, "resume": {"downloading", "waiting", "getting sources", "connecting", "queued"}}[action]
 
@@ -1754,7 +1826,7 @@ def change_transfer_state(action, hash_value=None):
             return action_response(action, False, "TRANSFER_NOT_FOUND", normalize_action_error(action, "TRANSFER_NOT_FOUND"), status=404, data={"hash": hash_value})
         if after.get("status") in target_states:
             cache_clear("downloads")
-            return action_response(action, True, "SUCCESS", "Pause confirmée." if action == "pause" else "Reprise confirmée.", confirmed=True, data={"download": after, "hash": hash_value})
+            return action_response(action, True, "SUCCESS", "Pause confirmée." if action == "pause" else "Reprise confirmée.", confirmed=True, data={"download": after, "hash": hash_value, "changed_hashes": [hash_value]})
         return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502, data={"download": after, "hash": hash_value})
 
     # Bulk action best-effort confirmation
@@ -1770,7 +1842,7 @@ def change_transfer_state(action, hash_value=None):
         confirmed = after_paused < before_paused or before_paused == 0
         message = "Reprise globale confirmée." if confirmed else "Commande de reprise envoyée. Vérifie les transferts."
     cache_clear("downloads")
-    return action_response(action, True, "SUCCESS", message, confirmed=confirmed, data={"before_active": before_active, "after_active": after_active, "before_paused": before_paused, "after_paused": after_paused})
+    return action_response(action, True, "SUCCESS", message, confirmed=confirmed, data={"before_active": before_active, "after_active": after_active, "before_paused": before_paused, "after_paused": after_paused, "changed_hashes": []})
 
 
 def change_transfer_state_bulk(action, hashes):
@@ -1899,9 +1971,14 @@ def change_transfer_state_bulk(action, hashes):
 
     action_label = {"pause": "Pause", "resume": "Reprise", "cancel": "Suppression"}[action]
     message = f"{action_label} lot: {success} confirmé(s), {already} déjà OK, {summary['missing']} introuvable(s), {failed} échec(s)."
+    overview = summarize_transfer_action_results(results)
+    removed_hashes = overview["confirmed_hashes"][:] if action == "cancel" else []
     return action_response(f"bulk_{action}", ok, code, message, confirmed=(confirmed_count == len(valid_hashes) and summary["missing"] == 0), status=status, data={
         "summary": summary,
         "results": results[:200],
+        "overview": overview,
+        "changed_hashes": overview["confirmed_hashes"],
+        "removed_hashes": removed_hashes,
         "output": interactive_output if err else "",
     })
 
