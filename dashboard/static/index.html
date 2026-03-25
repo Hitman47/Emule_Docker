@@ -112,6 +112,27 @@ tr:hover{background:var(--bg3)}
 .msg.err{background:rgba(239,68,68,.1);color:var(--red);border:1px solid rgba(239,68,68,.2)}
 .msg.info{background:rgba(99,102,241,.1);color:var(--accent2);border:1px solid rgba(99,102,241,.2)}
 
+/* ── Toast (fixed, must not block clicks) ── */
+.toast-fixed{position:fixed;bottom:20px;right:20px;z-index:9999;max-width:350px;
+  pointer-events:none;padding:12px 16px;border-radius:var(--radius);font-size:.88em;
+  display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(8px);transition:all .3s}
+.toast-fixed.show{opacity:1;transform:translateY(0)}
+.toast-fixed.ok{background:rgba(34,197,94,.15);color:var(--green);border:1px solid rgba(34,197,94,.3);backdrop-filter:blur(8px)}
+.toast-fixed.err{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3);backdrop-filter:blur(8px)}
+.toast-fixed.info{background:rgba(99,102,241,.15);color:var(--accent2);border:1px solid rgba(99,102,241,.3);backdrop-filter:blur(8px)}
+
+/* ── Sparkline ── */
+.sparkline{display:inline-block;vertical-align:middle}
+.sparkline svg{display:block}
+
+/* ── Kbd shortcuts hint ── */
+.kbd{display:inline-block;padding:2px 6px;border-radius:4px;font-size:.7em;
+  background:var(--bg3);border:1px solid var(--border);color:var(--text3);font-family:monospace;vertical-align:middle}
+
+/* ── Badge count on tabs ── */
+.tab-badge{background:var(--accent);color:#fff;font-size:.65em;padding:1px 6px;
+  border-radius:10px;margin-left:4px;font-weight:700;vertical-align:middle}
+
 /* ── Spinner ── */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);
   border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
@@ -164,10 +185,12 @@ tr:hover{background:var(--bg3)}
       <div class="card">
         <div class="label">↓ Téléchargement</div>
         <div class="value" id="dlSpeed">—<span class="unit">KB/s</span></div>
+        <div class="sparkline" id="dlSparkline"></div>
       </div>
       <div class="card">
         <div class="label">↑ Upload</div>
         <div class="value" id="ulSpeed">—<span class="unit">KB/s</span></div>
+        <div class="sparkline" id="ulSparkline"></div>
       </div>
       <div class="card">
         <div class="label">Transferts actifs</div>
@@ -215,7 +238,7 @@ tr:hover{background:var(--bg3)}
   <!-- ══════════════════════════════════════════ -->
   <div class="panel" id="panel-search">
     <div class="search-box">
-      <input type="text" id="searchQuery" placeholder="Rechercher des fichiers sur le réseau ED2K / Kad..."
+      <input type="text" id="searchQuery" placeholder="Rechercher sur le réseau ED2K / Kad..."
        onkeydown="if(event.key==='Enter')doSearch()">
       <select id="searchType">
         <option value="kad">Kad</option>
@@ -223,6 +246,7 @@ tr:hover{background:var(--bg3)}
         <option value="local">Serveur local</option>
       </select>
       <button class="btn btn-primary" onclick="doSearch()">🔍 Chercher</button>
+      <span class="kbd" title="Raccourci clavier">Ctrl+K</span>
     </div>
     <button class="btn btn-ghost btn-sm" onclick="refreshResults()" style="margin-bottom:12px">
       🔄 Rafraîchir résultats
@@ -370,7 +394,7 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:10px">🔄 Scanner les sources</div>
       <p style="color:var(--text2);font-size:.85em;margin-bottom:10px">
-        Lance un scan immédiat de toutes les sources activées. Met à jour server.met, nodes.dat et l'IP filter.
+        Lance un scan immédiat de toutes les sources activées. Met à jour server.met, nodes.dat et le filtre IP.
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-primary btn-sm" onclick="scanNow()">🚀 Scanner maintenant</button>
@@ -435,15 +459,52 @@ async function apiCall(path) {
 }
 
 function showToast(type, msg) {
-  // Simple inline toast
+  // Remove any existing toast
+  document.querySelectorAll('.toast-fixed').forEach(e => e.remove());
   const el = document.createElement('div');
-  el.className = 'msg show ' + type;
+  el.className = 'toast-fixed ' + type;
   el.textContent = msg;
-  el.style.position = 'fixed'; el.style.bottom = '20px'; el.style.right = '20px';
-  el.style.zIndex = '9999'; el.style.maxWidth = '350px';
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3000);
 }
+
+// ── Sparkline (speed history) ──
+const speedHistory = { dl: [], ul: [] };
+const SPARK_MAX = 30; // keep last 30 readings (= 2.5 min at 5s interval)
+
+function pushSpeed(type, value) {
+  speedHistory[type].push(value);
+  if (speedHistory[type].length > SPARK_MAX) speedHistory[type].shift();
+}
+
+function renderSparkline(containerId, data, color) {
+  const el = document.getElementById(containerId);
+  if (!el || data.length < 2) { if (el) el.innerHTML = ''; return; }
+  const w = 120, h = 24;
+  const max = Math.max(...data, 1);
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * w;
+    const y = h - (v / max) * (h - 2) - 1;
+    return `${x},${y}`;
+  }).join(' ');
+  el.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".7"/>
+  </svg>`;
+}
+
+// ── Keyboard shortcut: Ctrl+K → focus search ──
+document.addEventListener('keydown', function(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    // Switch to search tab
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    document.querySelector('[data-tab="search"]').classList.add('active');
+    document.getElementById('panel-search').classList.add('active');
+    document.getElementById('searchQuery').focus();
+  }
+});
 
 // ── Status / Monitoring ──
 async function loadStatus() {
@@ -461,6 +522,12 @@ async function loadStatus() {
   // Cards
   document.getElementById('dlSpeed').innerHTML = d.download_speed.toFixed(1) + '<span class="unit">KB/s</span>';
   document.getElementById('ulSpeed').innerHTML = d.upload_speed.toFixed(1) + '<span class="unit">KB/s</span>';
+
+  // Sparklines
+  pushSpeed('dl', d.download_speed);
+  pushSpeed('ul', d.upload_speed);
+  renderSparkline('dlSparkline', speedHistory.dl, '#6366f1');
+  renderSparkline('ulSparkline', speedHistory.ul, '#22c55e');
 
   // Raw
   document.getElementById('rawStatus').textContent = d.raw || '(aucune donnée)';
@@ -493,11 +560,39 @@ async function loadDownloads() {
   }
   document.getElementById('activeDl').textContent = d.length;
 
-  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>État</th></tr></thead><tbody>';
+  // Update downloads tab badge
+  const dlTab = document.querySelector('[data-tab="downloads"]');
+  const existingBadge = dlTab.querySelector('.tab-badge');
+  if (existingBadge) existingBadge.remove();
+  if (d.length > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'tab-badge';
+    badge.textContent = d.length;
+    dlTab.appendChild(badge);
+  }
+
+  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th></tr></thead><tbody>';
   d.forEach(dl => {
     const statusColor = dl.status === 'downloading' ? 'var(--green)' :
                         dl.status === 'paused' ? 'var(--orange)' :
                         dl.status === 'error' ? 'var(--red)' : 'var(--text3)';
+    // ETA estimation
+    let eta = '—';
+    if (dl.speed > 0 && dl.progress > 0 && dl.progress < 100) {
+      const sizeMatch = (dl.size || '').match(/([\d.]+)\s*(KB|MB|GB|TB)/i);
+      if (sizeMatch) {
+        const sizeVal = parseFloat(sizeMatch[1]);
+        const unit = sizeMatch[2].toUpperCase();
+        const mult = {KB:1, MB:1024, GB:1048576, TB:1073741824};
+        const totalKB = sizeVal * (mult[unit] || 1);
+        const remainKB = totalKB * (1 - dl.progress / 100);
+        const secs = remainKB / dl.speed;
+        if (secs < 60) eta = Math.round(secs) + 's';
+        else if (secs < 3600) eta = Math.round(secs / 60) + 'min';
+        else if (secs < 86400) eta = Math.round(secs / 3600) + 'h ' + Math.round((secs % 3600) / 60) + 'min';
+        else eta = Math.round(secs / 86400) + 'j';
+      }
+    }
     html += `<tr>
       <td class="fname" title="${esc(dl.name)}">${esc(dl.name)}</td>
       <td>${dl.size || '—'}</td>
@@ -507,6 +602,7 @@ async function loadDownloads() {
       </td>
       <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '—'}</td>
       <td>${dl.sources || '—'}</td>
+      <td style="font-size:.82em;color:var(--text2)">${eta}</td>
       <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
     </tr>`;
   });
@@ -618,7 +714,7 @@ function renderServers(servers, raw) {
   const rawBox = document.getElementById('serversRaw');
   if (rawBox) rawBox.textContent = raw || '';
   if (!servers || !servers.length) {
-    container.innerHTML = '<div class="empty">Aucun serveur parsé pour l'instant</div>';
+    container.innerHTML = '<div class="empty">Aucun serveur pour le moment</div>';
     return;
   }
   let html = '<table><thead><tr><th>Nom</th><th>Adresse</th><th>Brut</th></tr></thead><tbody>';
@@ -656,7 +752,7 @@ async function importServerSources(sources) {
     }
   } catch (e) {
     msg.className = 'msg err show';
-    msg.textContent = 'Erreur réseau pendant l'import';
+    msg.textContent = 'Erreur réseau';
   }
   setTimeout(() => msg.classList.remove('show'), 5000);
 }
@@ -683,6 +779,18 @@ async function loadFiles() {
   }
   allFiles = d;
   document.getElementById('totalFiles').textContent = d.length;
+
+  // Badge on files tab
+  const filesTab = document.querySelector('[data-tab="files"]');
+  const existingFBadge = filesTab.querySelector('.tab-badge');
+  if (existingFBadge) existingFBadge.remove();
+  if (d.length > 0) {
+    const fb = document.createElement('span');
+    fb.className = 'tab-badge';
+    fb.textContent = d.length;
+    filesTab.appendChild(fb);
+  }
+
   renderFiles(d);
 }
 
@@ -867,18 +975,22 @@ async function showLog(name) {
 }
 
 // ── Init & Auto-refresh ──
+function getActiveTab() {
+  const active = document.querySelector('.tab.active');
+  return active ? active.dataset.tab : 'dashboard';
+}
+
 async function init() {
   await loadStatus();
   await loadDownloads();
   await loadFiles();
 
-  // Auto-refresh every 5 seconds
+  // Auto-refresh every 5s — only fetches data for visible tab
   refreshInterval = setInterval(async () => {
     await loadStatus();
-    // Only refresh downloads if tab is active
-    if (document.getElementById('panel-downloads').classList.contains('active')) {
-      await loadDownloads();
-    }
+    const tab = getActiveTab();
+    if (tab === 'downloads') await loadDownloads();
+    if (tab === 'servers') await loadServers();
   }, 5000);
 }
 
