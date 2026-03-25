@@ -573,6 +573,11 @@ async function loadStatus() {
     ed2kBox.className = 'conn-box orange';
     ed2kVal.textContent = 'Connecté — Low ID';
     ed2kDet.textContent = d.ed2k_server ? 'Serveur : ' + d.ed2k_server : 'Normal derrière un VPN';
+  } else if (es === 'connecting') {
+    ed2kPill.className = 'pill info'; ed2kPill.textContent = '● ED2K...';
+    ed2kBox.className = 'conn-box orange';
+    ed2kVal.innerHTML = 'Connexion en cours... <div class="spinner" style="margin-left:6px"></div>';
+    ed2kDet.textContent = 'Handshake avec le serveur, patientez quelques secondes';
   } else {
     ed2kPill.className = 'pill off'; ed2kPill.textContent = '● ED2K Off';
     ed2kBox.className = 'conn-box red';
@@ -1055,48 +1060,49 @@ async function connectED2K() {
   const msg = document.getElementById('connectResult');
   if (msg) {
     msg.className = 'msg info show';
-    msg.innerHTML = '<div class="spinner"></div> Connexion ED2K en cours (peut prendre 10-15s)...';
+    msg.innerHTML = '<div class="spinner"></div> Connexion ED2K en cours (10-15s)...';
   }
   showToast('info', 'Connexion ED2K en cours...');
 
   const d = await api('/api/connect?target=ed2k');
   if (!d) {
-    if (msg) { msg.className = 'msg err show'; msg.textContent = 'Erreur de communication avec le dashboard'; }
+    if (msg) { msg.className = 'msg err show'; msg.textContent = 'Erreur de communication'; }
     return;
   }
 
   const r = d.results || {};
+  const state = r.ed2k_state || 'unknown';
   let detail = '';
-
-  // Show connect attempt result
   if (r.connect_ed2k) detail += 'connect ed2k: ' + r.connect_ed2k + '\n';
-
-  // Show server attempts if any
   if (r.server_attempts && r.server_attempts.length > 0) {
-    detail += '\nTentatives serveurs individuels:\n';
-    r.server_attempts.forEach(a => {
-      detail += '  ' + a.addr + ' -> ' + (a.output || '?') + '\n';
-    });
+    detail += '\nTentatives serveurs:\n';
+    r.server_attempts.forEach(a => { detail += '  ' + a.addr + ' -> ' + (a.output || '?') + '\n'; });
   }
-
-  // Final status
-  const finalStatus = r.final_status || r.status_after || '';
-  if (finalStatus) detail += '\nStatut final:\n' + finalStatus;
-
-  // Determine if we connected
-  const connected = /ed2k.*connected/i.test(finalStatus) && !/not connected/i.test(finalStatus);
+  const finalRaw = r.status_final || r.status_after || '';
+  if (finalRaw) detail += '\nStatut:\n' + finalRaw;
 
   if (msg) {
-    msg.className = 'msg ' + (connected ? 'ok' : 'err') + ' show';
-    msg.innerHTML = (connected ? '&#9989; ED2K connecté !' : '&#10060; ED2K non connecté') +
-      '<pre style="font-size:.75em;margin-top:8px;white-space:pre-wrap;max-height:200px;overflow:auto;color:inherit;opacity:.8">' + esc(detail) + '</pre>';
+    if (state === 'connected') {
+      msg.className = 'msg ok show';
+      msg.innerHTML = '&#9989; ED2K connecté !';
+    } else if (state === 'connecting') {
+      msg.className = 'msg info show';
+      msg.innerHTML = '&#9889; ED2K en cours de connexion... Le statut se mettra à jour dans quelques secondes.';
+    } else {
+      msg.className = 'msg err show';
+      msg.innerHTML = '&#10060; ED2K non connecté' +
+        '<pre style="font-size:.75em;margin-top:8px;white-space:pre-wrap;max-height:150px;overflow:auto;color:inherit;opacity:.8">' + esc(detail) + '</pre>';
+    }
   }
 
-  if (connected) showToast('ok', 'ED2K connecté !');
-  else showToast('err', 'ED2K: connexion échouée — voir les détails');
+  if (state === 'connected') showToast('ok', 'ED2K connecté !');
+  else if (state === 'connecting') showToast('ok', 'ED2K en cours de connexion...');
+  else showToast('err', 'ED2K: voir les détails');
 
-  // Refresh status
-  setTimeout(loadStatus, 2000);
+  // Delayed refresh to catch the final state
+  setTimeout(loadStatus, 3000);
+  setTimeout(loadStatus, 8000);
+  setTimeout(() => { if (msg && msg.classList.contains('show')) msg.classList.remove('show'); }, 15000);
 }
 
 // ── Logs ──

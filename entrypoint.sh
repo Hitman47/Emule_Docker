@@ -541,6 +541,25 @@ start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
+# Auto-connect ED2K in background after amuled is ready
+(
+    sleep 15
+    printf "[AUTO-CONNECT] Tentative de connexion ED2K...\n"
+    # Source credentials
+    [ -f /etc/environment ] && . /etc/environment
+    # Try plain password then hash
+    OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "connect ed2k" 2>&1)
+    if echo "$OUT" | grep -qi "wrong password\|Authentication failed"; then
+        OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_ENCODED_PWD}" -c "connect ed2k" 2>&1)
+    fi
+    printf "[AUTO-CONNECT] Résultat: %s\n" "$(echo "$OUT" | tail -3 | tr '\n' ' ')"
+    sleep 5
+    # Also connect Kad if needed
+    amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "connect kad" 2>/dev/null || \
+    amulecmd -h localhost -p 4712 -P "${AMULE_GUI_ENCODED_PWD}" -c "connect kad" 2>/dev/null
+    printf "[AUTO-CONNECT] Connexion Kad envoyée\n"
+) &
+
 while true; do
     mod_auto_share
     gosu "${AMULE_UID}:${AMULE_GID}" amuled -c "${AMULE_HOME}" -o

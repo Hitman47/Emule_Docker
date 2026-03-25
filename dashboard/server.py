@@ -461,6 +461,9 @@ def parse_status(raw):
             if "not connected" in ll or "disconnected" in ll:
                 info["ed2k_status"] = "disconnected"
                 info["connected_ed2k"] = False
+            elif "now connecting" in ll:
+                info["ed2k_status"] = "connecting"
+                info["connected_ed2k"] = False
             elif "connected" in ll:
                 info["connected_ed2k"] = True
                 if "high" in ll or "highid" in ll or "high id" in ll:
@@ -739,41 +742,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             results = {}
 
             if target in ("all", "ed2k"):
-                # 1. Try generic connect
                 _log("CONNECT ED2K: sending 'connect ed2k'")
                 out1 = run_amulecmd("connect ed2k", timeout=10)
                 results["connect_ed2k"] = out1
-                _log(f"CONNECT ED2K result: {out1[:200]}")
+                results["connect_ok"] = "successful" in out1.lower()
 
-                # 2. Wait and check status
-                time.sleep(2)
+                # Wait for handshake then check
+                time.sleep(5)
                 status_raw = run_amulecmd("status", timeout=8)
                 results["status_after"] = status_raw
 
-                # 3. If still not connected, try connecting to specific servers
-                if "not connected" in status_raw.lower() or "disconnected" in status_raw.lower() or not re.search(r'ed2k.*connected', status_raw, re.I):
-                    _log("CONNECT ED2K: generic connect failed, trying specific servers...")
+                # Detect state
+                sl = status_raw.lower()
+                if "now connecting" in sl:
+                    results["ed2k_state"] = "connecting"
+                    # Wait a bit more and re-check
+                    time.sleep(5)
+                    status_raw2 = run_amulecmd("status", timeout=8)
+                    results["status_final"] = status_raw2
+                    sl2 = status_raw2.lower()
+                    if re.search(r'ed2k.*connected', sl2) and "not connected" not in sl2:
+                        results["ed2k_state"] = "connected"
+                    elif "now connecting" in sl2:
+                        results["ed2k_state"] = "connecting"
+                elif re.search(r'ed2k.*connected', sl) and "not connected" not in sl:
+                    results["ed2k_state"] = "connected"
+                else:
+                    results["ed2k_state"] = "disconnected"
+                    # Try specific servers as fallback
+                    _log("CONNECT ED2K: trying specific servers...")
                     servers_raw = run_amulecmd("show servers", timeout=8)
-                    # Parse server IPs
                     server_addrs = re.findall(r'((?:\d{1,3}\.){3}\d{1,3}:\d{2,5})', servers_raw)
-                    results["servers_found"] = len(server_addrs)
                     results["server_attempts"] = []
-
-                    for addr in server_addrs[:3]:  # Try first 3
-                        _log(f"CONNECT ED2K: trying server {addr}")
+                    for addr in server_addrs[:3]:
                         out = run_amulecmd(f"connect {addr}", timeout=10)
                         results["server_attempts"].append({"addr": addr, "output": out[:200]})
-                        _log(f"  result: {out[:150]}")
                         time.sleep(1)
+                    time.sleep(5)
+                    final = run_amulecmd("status", timeout=8)
+                    results["status_final"] = final
+                    fl = final.lower()
+                    if re.search(r'ed2k.*connected', fl) and "not connected" not in fl:
+                        results["ed2k_state"] = "connected"
+                    elif "now connecting" in fl:
+                        results["ed2k_state"] = "connecting"
 
-                    # Final status check
-                    time.sleep(3)
-                    final_status = run_amulecmd("status", timeout=8)
-                    results["final_status"] = final_status
-                    _log(f"CONNECT ED2K final status: {final_status[:200]}")
+                _log(f"CONNECT ED2K final state: {results['ed2k_state']}")
 
             if target in ("all", "kad"):
-                _log("CONNECT KAD: sending 'connect kad'")
                 out_kad = run_amulecmd("connect kad", timeout=10)
                 results["connect_kad"] = out_kad
 
