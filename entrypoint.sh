@@ -179,14 +179,28 @@ SETTINGS_EOF
 start_dashboard() {
     DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-"false"}
     DASHBOARD_PORT=${DASHBOARD_PORT:-8078}
+
+    # ── Write EC credentials file (used by dashboard + cron scripts) ──
+    EC_CRED_FILE="${AMULE_HOME}/.ec_credentials"
+    cat > "$EC_CRED_FILE" << CREDEOF
+EC_HOST=localhost
+EC_PORT=4712
+EC_PASSWORD=${AMULE_GUI_PWD}
+EC_PASSWORD_HASH=${AMULE_GUI_ENCODED_PWD}
+CREDEOF
+    chmod 600 "$EC_CRED_FILE"
+    chown "${AMULE_UID}:${AMULE_GID}" "$EC_CRED_FILE" 2>/dev/null || true
+    printf "[CREDENTIALS] EC password written to %s\n" "$EC_CRED_FILE"
+
     if [ "$DASHBOARD_ENABLED" = "true" ]; then
         printf "[DASHBOARD] Démarrage du dashboard sur le port %s...\n" "$DASHBOARD_PORT"
         export AMULE_HOME
         export INCOMING_DIR="$AMULE_INCOMING"
         export TEMP_DIR="$AMULE_TEMP"
-        export AMULE_EC_HOST="127.0.0.1"
+        export AMULE_EC_HOST="localhost"
         export AMULE_EC_PORT="4712"
         export AMULE_EC_PASSWORD="${AMULE_GUI_PWD}"
+        export AMULE_EC_PASSWORD_HASH="${AMULE_GUI_ENCODED_PWD}"
         export DASHBOARD_PORT
         export DASHBOARD_PWD="${DASHBOARD_PWD:-${WEBUI_PWD:-admin}}"
         export SETTINGS_FILE="${AMULE_HOME}/dashboard-settings.json"
@@ -194,11 +208,13 @@ start_dashboard() {
         DASHBOARD_PID=$!
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
     fi
-    # Export EC credentials for cron scripts too
+
+    # ── /etc/environment for cron scripts ──
     {
-        printf 'AMULE_EC_HOST=127.0.0.1\n'
+        printf 'AMULE_EC_HOST=localhost\n'
         printf 'AMULE_EC_PORT=4712\n'
         printf 'AMULE_EC_PASSWORD=%s\n' "${AMULE_GUI_PWD}"
+        printf 'AMULE_EC_PASSWORD_HASH=%s\n' "${AMULE_GUI_ENCODED_PWD}"
         printf 'AMULE_HOME=%s\n' "${AMULE_HOME}"
         printf 'INCOMING_DIR=%s\n' "${AMULE_INCOMING}"
         printf 'SETTINGS_FILE=%s\n' "${AMULE_HOME}/dashboard-settings.json"

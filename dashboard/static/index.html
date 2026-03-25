@@ -415,6 +415,13 @@ tr:hover{background:var(--bg3)}
       </div>
       <pre id="logViewer" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:250px;overflow:auto;white-space:pre-wrap;word-break:break-all">Sélectionne un log ci-dessus</pre>
     </div>
+
+    <!-- Diagnostic -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🔧 Diagnostic connexion</div>
+      <button class="btn btn-ghost btn-sm" onclick="runDebug()" style="margin-bottom:8px">Tester la connexion EC</button>
+      <pre id="debugOutput" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:200px;overflow:auto;white-space:pre-wrap">Clique sur le bouton pour tester</pre>
+    </div>
   </div>
 </div>
 
@@ -971,6 +978,18 @@ async function showLog(name) {
     viewer.scrollTop = viewer.scrollHeight;
   } else {
     viewer.textContent = '(erreur ou log introuvable)';
+  }
+}
+
+// ── Debug ──
+async function runDebug() {
+  const el = document.getElementById('debugOutput');
+  el.textContent = 'Test en cours...';
+  const d = await api('/api/debug');
+  if (d) {
+    el.textContent = JSON.stringify(d, null, 2);
+  } else {
+    el.textContent = 'Erreur de connexion au dashboard';
   }
 }
 

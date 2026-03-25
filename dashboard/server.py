@@ -20,13 +20,43 @@ from urllib.request import Request, urlopen
 from pathlib import Path
 
 # ── Config ──
-EC_HOST = "localhost"
+EC_HOST = os.environ.get("AMULE_EC_HOST", "localhost")
 EC_PORT = os.environ.get("AMULE_EC_PORT", "4712")
 EC_PASSWORD = os.environ.get("AMULE_EC_PASSWORD", "")
+EC_PASSWORD_HASH = os.environ.get("AMULE_EC_PASSWORD_HASH", "")
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "4713"))
 DASHBOARD_PWD = os.environ.get("DASHBOARD_PWD", "admin")
 INCOMING_DIR = os.environ.get("INCOMING_DIR", "/incoming")
 TEMP_DIR = os.environ.get("TEMP_DIR", "/temp")
+
+# Try to load credentials from file (more reliable than env vars)
+AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
+_cred_file = os.path.join(AMULE_HOME, ".ec_credentials")
+try:
+    with open(_cred_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if '=' in _line:
+                _k, _v = _line.split('=', 1)
+                if _k == 'EC_PASSWORD' and _v:
+                    EC_PASSWORD = _v
+                elif _k == 'EC_PASSWORD_HASH' and _v:
+                    EC_PASSWORD_HASH = _v
+                elif _k == 'EC_HOST' and _v:
+                    EC_HOST = _v
+                elif _k == 'EC_PORT' and _v:
+                    EC_PORT = _v
+    print(f"[DASHBOARD] Credentials loaded from {_cred_file}")
+except FileNotFoundError:
+    print(f"[DASHBOARD] No credential file at {_cred_file}, using env vars")
+
+# If we still have no hash, compute it
+if not EC_PASSWORD_HASH and EC_PASSWORD:
+    import hashlib as _hl
+    EC_PASSWORD_HASH = _hl.md5(EC_PASSWORD.encode()).hexdigest()
+
+# Track which password mode works (auto-detected on first successful call)
+_password_mode = None  # None = not yet tested, "plain" or "hash"
 
 STATIC_DIR = Path(__file__).parent / "static"
 AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
@@ -305,29 +335,77 @@ def import_server_sources(sources, reconnect=True):
     }
 
 
-def run_amulecmd(command, timeout=15):
-    """Execute an amulecmd command and return cleaned output."""
+def _exec_amulecmd(command, password, timeout=15):
+    """Low-level amulecmd execution with a specific password."""
     try:
         result = subprocess.run(
-            ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", EC_PASSWORD, "-c", command],
+            ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", password, "-c", command],
             capture_output=True, text=True, timeout=timeout
         )
         output = result.stdout + result.stderr
-        lines = output.split("\n")
-        clean = []
-        skip_header = True
-        for line in lines:
-            if skip_header and ("Connected to" in line or "This is amulecmd" in line
-                                or "Creating client" in line or "---" in line
-                                or line.strip() == "" or "aMule" in line):
-                continue
-            skip_header = False
-            clean.append(line)
-        return "\n".join(clean).strip()
+        return output
     except subprocess.TimeoutExpired:
         return "ERROR: timeout"
     except Exception as e:
         return f"ERROR: {e}"
+
+
+def _clean_amulecmd_output(output):
+    """Remove amulecmd header lines from output."""
+    lines = output.split("\n")
+    clean = []
+    skip_header = True
+    for line in lines:
+        if skip_header and ("Connected to" in line or "This is amulecmd" in line
+                            or "Creating client" in line or "---" in line
+                            or line.strip() == "" or "aMule" in line):
+            continue
+        skip_header = False
+        clean.append(line)
+    return "\n".join(clean).strip()
+
+
+def run_amulecmd(command, timeout=15):
+    """Execute amulecmd with auto-detection of password mode (plain vs hash).
+
+    On first call, tries plain text password. If auth fails and we have a hash,
+    tries the hash. Caches which mode works for subsequent calls.
+    """
+    global _password_mode
+
+    # Determine password order to try
+    if _password_mode == "plain":
+        passwords = [EC_PASSWORD]
+    elif _password_mode == "hash":
+        passwords = [EC_PASSWORD_HASH]
+    else:
+        # Not yet determined — try plain first, then hash
+        passwords = [EC_PASSWORD]
+        if EC_PASSWORD_HASH and EC_PASSWORD_HASH != EC_PASSWORD:
+            passwords.append(EC_PASSWORD_HASH)
+
+    for i, pwd in enumerate(passwords):
+        if not pwd:
+            continue
+        output = _exec_amulecmd(command, pwd, timeout)
+
+        # Check for auth failure
+        if "Authentication failed" in output or "wrong password" in output.lower():
+            if i < len(passwords) - 1:
+                continue  # Try next password
+            # All passwords failed
+            return _clean_amulecmd_output(output)
+
+        # Success (or other error like "not connected") — remember which password worked
+        if "Authentication failed" not in output:
+            if _password_mode is None:
+                mode = "plain" if pwd == EC_PASSWORD else "hash"
+                _password_mode = mode
+                print(f"[DASHBOARD] amulecmd password mode: {mode}")
+
+        return _clean_amulecmd_output(output)
+
+    return "ERROR: no password configured"
 
 
 def parse_status(raw):
@@ -571,6 +649,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/stats":
             self.send_json({"raw": run_amulecmd("statistics")})
+
+        elif path == "/api/debug":
+            # Diagnostic endpoint — shows password mode and connection test
+            test_output = run_amulecmd("status", timeout=8)
+            auth_ok = "Authentication failed" not in test_output and "wrong password" not in test_output.lower()
+            self.send_json({
+                "ec_host": EC_HOST,
+                "ec_port": EC_PORT,
+                "password_mode": _password_mode or "not yet determined",
+                "password_plain_set": bool(EC_PASSWORD),
+                "password_hash_set": bool(EC_PASSWORD_HASH),
+                "password_plain_preview": EC_PASSWORD[:3] + "***" if EC_PASSWORD else "(empty)",
+                "password_hash_preview": EC_PASSWORD_HASH[:8] + "..." if EC_PASSWORD_HASH else "(empty)",
+                "cred_file_exists": os.path.isfile(_cred_file),
+                "auth_ok": auth_ok,
+                "test_output": test_output[:500],
+            })
 
         elif path == "/api/organize":
             try:

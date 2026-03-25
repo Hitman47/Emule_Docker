@@ -8,12 +8,25 @@
 EC_HOST="${AMULE_EC_HOST:-localhost}"
 EC_PORT="${AMULE_EC_PORT:-4712}"
 EC_PASSWORD="${AMULE_EC_PASSWORD:-}"
+EC_PASSWORD_HASH="${AMULE_EC_PASSWORD_HASH:-}"
 AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
 SETTINGS_FILE="${SETTINGS_FILE:-${AMULE_HOME}/dashboard-settings.json}"
 LOG_PREFIX="[SRC-SCAN]"
 
+# Try loading credentials from file
+CRED_FILE="${AMULE_HOME}/.ec_credentials"
+if [ -f "$CRED_FILE" ]; then
+    . "$CRED_FILE"
+fi
+
 amulecmd_run() {
-    amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD" -c "$1" 2>&1
+    OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD" -c "$1" 2>&1)
+    if echo "$OUTPUT" | grep -qi "wrong password\|Authentication failed"; then
+        if [ -n "$EC_PASSWORD_HASH" ]; then
+            OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD_HASH" -c "$1" 2>&1)
+        fi
+    fi
+    echo "$OUTPUT"
 }
 
 printf "%s Scan périodique des sources serveurs — %s\n" "$LOG_PREFIX" "$(date '+%Y-%m-%d %H:%M')"
