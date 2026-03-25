@@ -647,19 +647,91 @@ def parse_downloads(raw):
 
 
 def parse_search_results(raw):
+    """Parse amulecmd 'results' output.
+    
+    Debian amulecmd 2.3.3 table format:
+      Nr.    Filename:                        Size(MB):  Sources:
+      -----------------------------------------------------------
+      0.    Lana Rhoades Blacked Anal.mp4     259.101    16
+      1.    Some Other File.mkv               1024.500   3
+    
+    Also handles: N) filename SIZE Sources: N
+    """
     results = []
     for line in raw.split("\n"):
         line = line.strip()
-        if not line or line.startswith("---"): continue
-        m = re.match(r'^(\d+)\)\s+(.+?)\s+([\d.]+\s*[KMGT]?B)\s+Source[s]?:\s*(\d+)', line, re.I)
-        if m:
-            results.append({"id": int(m.group(1)), "name": m.group(2).strip(),
-                            "size": m.group(3), "sources": int(m.group(4))})
-        else:
-            m2 = re.match(r'^(\d+)\)\s+(.+)', line)
-            if m2:
-                results.append({"id": int(m2.group(1)), "name": m2.group(2).strip(),
-                                "size": "", "sources": 0})
+        if not line or line.startswith("---") or line.startswith("Nr.") or line.startswith("Filename"):
+            continue
+
+        # Format 1: "N.  filename  SIZE  SOURCES" (Debian table format)
+        m_table = re.match(r'^(\d+)\.\s+(.+?)\s{2,}([\d.]+)\s+(\d+)\s*$', line)
+        if m_table:
+            size_mb = float(m_table.group(3))
+            if size_mb > 1024:
+                size_str = f"{size_mb/1024:.1f} GB"
+            else:
+                size_str = f"{size_mb:.1f} MB"
+            results.append({
+                "id": int(m_table.group(1)),
+                "name": m_table.group(2).strip(),
+                "size": size_str,
+                "size_mb": size_mb,
+                "sources": int(m_table.group(4))
+            })
+            continue
+
+        # Format 2: "N) filename SIZE Sources: N" (other versions)
+        m_paren = re.match(r'^(\d+)\)\s+(.+?)\s+([\d.]+\s*[KMGT]?i?B)\s+Source[s]?:\s*(\d+)', line, re.I)
+        if m_paren:
+            results.append({
+                "id": int(m_paren.group(1)),
+                "name": m_paren.group(2).strip(),
+                "size": m_paren.group(3),
+                "sources": int(m_paren.group(4))
+            })
+            continue
+
+        # Format 3: "N) filename" or "N. filename" (with possible trailing size/sources)
+        m_min = re.match(r'^(\d+)[.)]\s+(.+)', line)
+        if m_min:
+            rest = m_min.group(2).strip()
+            # Try: filename  SIZE  SOURCES (2+ spaces)
+            m_tail = re.search(r'^(.+?)\s{2,}([\d.]+)\s+(\d+)\s*$', rest)
+            if m_tail:
+                size_mb = float(m_tail.group(2))
+                size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
+                results.append({
+                    "id": int(m_min.group(1)),
+                    "name": m_tail.group(1).strip(),
+                    "size": size_str,
+                    "size_mb": size_mb,
+                    "sources": int(m_tail.group(3))
+                })
+            else:
+                # Try: filename SIZE SOURCES (single space, match trailing numbers)
+                m_tail2 = re.search(r'^(.+?)\s+([\d.]{3,})\s+(\d+)\s*$', rest)
+                if m_tail2 and float(m_tail2.group(2)) > 1:
+                    size_mb = float(m_tail2.group(2))
+                    size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
+                    results.append({
+                        "id": int(m_min.group(1)),
+                        "name": m_tail2.group(1).strip(),
+                        "size": size_str,
+                        "size_mb": size_mb,
+                        "sources": int(m_tail2.group(3))
+                    })
+                else:
+                    results.append({
+                        "id": int(m_min.group(1)),
+                        "name": rest,
+                        "size": "",
+                        "sources": 0
+                    })
+
+    # Sort by sources descending
+    results.sort(key=lambda x: x.get("sources", 0), reverse=True)
+
+    _log(f"parse_search_results: {len(results)} results parsed")
     return results
 
 
