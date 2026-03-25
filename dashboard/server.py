@@ -1632,14 +1632,30 @@ def add_favorite(name, ed2k_link, size="", sources=0, *, kind=None, query="", se
 
 def remove_favorite(ref):
     ref = str(ref or "").strip()
+    removed, _ = remove_favorites([ref])
+    return removed
+
+
+def remove_favorites(refs):
+    refs = [str(ref or "").strip() for ref in (refs or []) if str(ref or "").strip()]
+    if not refs:
+        return 0, []
+    wanted = set(refs)
     h = _load_history()
-    before = len(h.get("favorites", []))
-    h["favorites"] = [
-        f for f in h.get("favorites", [])
-        if str(f.get("favorite_id") or "") != ref and str(f.get("link") or "") != ref
-    ]
+    kept = []
+    removed_ids = []
+    for item in h.get("favorites", []):
+        norm = normalize_favorite_entry(item)
+        favorite_id = str((norm or item).get("favorite_id") or "").strip()
+        link = str((norm or item).get("link") or "").strip()
+        if favorite_id in wanted or link in wanted:
+            removed_ids.append(favorite_id or link)
+            continue
+        kept.append(item)
+    h["favorites"] = kept
     _save_history(h)
-    return before - len(h["favorites"])
+    return len(removed_ids), removed_ids
+
 
 def get_saved_searches():
     h = _load_history()
@@ -1684,11 +1700,66 @@ def add_saved_search(query, search_type="kad", label=""):
 
 
 def remove_saved_search(search_id):
+    removed, _ = remove_saved_searches([search_id])
+    return removed
+
+
+def remove_saved_searches(search_ids):
+    ids = [str(x or "").strip() for x in (search_ids or []) if str(x or "").strip()]
+    if not ids:
+        return 0, []
+    wanted = set(ids)
     h = _load_history()
-    before = len(h.get("saved_searches", []))
-    h["saved_searches"] = [s for s in h.get("saved_searches", []) if s.get("id") != search_id]
+    kept = []
+    removed_ids = []
+    for item in h.get("saved_searches", []):
+        item_id = str(item.get("id") or "").strip()
+        if item_id in wanted:
+            removed_ids.append(item_id)
+            continue
+        kept.append(item)
+    h["saved_searches"] = kept
     _save_history(h)
-    return before - len(h.get("saved_searches", []))
+    return len(removed_ids), removed_ids
+
+
+def update_saved_search(search_id, *, query=None, search_type=None, label=None):
+    search_id = str(search_id or "").strip()
+    if not search_id:
+        return False, "id requis", None
+    h = _load_history()
+    saved = h.get("saved_searches", [])
+    target = None
+    for item in saved:
+        if str(item.get("id") or "").strip() == search_id:
+            target = item
+            break
+    if not target:
+        return False, "Recherche sauvegardée introuvable", None
+
+    next_query = str(target.get("query") or "").strip() if query is None else str(query or "").strip()
+    next_type = str(target.get("type") or "kad").strip().lower() if search_type is None else str(search_type or "kad").strip().lower()
+    next_label = str(target.get("label") or next_query).strip() if label is None else str(label or "").strip()
+
+    if not next_query:
+        return False, "Query vide", None
+    if next_type not in ("kad", "global", "local"):
+        next_type = "kad"
+    normalized_key = f"{next_type}::{next_query.lower()}"
+    for item in saved:
+        if item is target:
+            continue
+        if item.get("key") == normalized_key:
+            return False, "Une recherche sauvegardée identique existe déjà", None
+
+    target["query"] = next_query
+    target["type"] = next_type
+    target["key"] = normalized_key
+    target["label"] = next_label or next_query
+    target["updated"] = time.strftime("%Y-%m-%d %H:%M")
+    target["updated_ts"] = int(time.time())
+    _save_history(h)
+    return True, "Recherche mise à jour", target
 
 
 def touch_saved_search(query, search_type="kad"):
@@ -3417,13 +3488,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json({"ok": False, "error": message}, 409 if query else 400)
 
-        elif parsed.path == "/api/saved_searches/remove":
+        elif parsed.path == "/api/saved_searches/update":
             search_id = str(data.get("id") or "").strip()
+            ok, message, item = update_saved_search(
+                search_id,
+                query=data.get("query") if "query" in data else None,
+                search_type=data.get("type") if "type" in data else None,
+                label=data.get("label") if "label" in data else None,
+            )
+            if ok:
+                self.send_json({"ok": True, "message": message, "item": item})
+            else:
+                status = 404 if search_id and item is None and message == "Recherche sauvegardée introuvable" else 409 if search_id else 400
+                self.send_json({"ok": False, "error": message}, status)
+
+        elif parsed.path == "/api/saved_searches/remove":
+            ids = data.get("ids")
+            search_id = str(data.get("id") or "").strip()
+            if isinstance(ids, list):
+                removed, removed_ids = remove_saved_searches(ids)
+                self.send_json({"ok": bool(removed), "removed": removed, "removed_ids": removed_ids}, 200 if removed else 404)
+                return
             if not search_id:
                 self.send_json({"ok": False, "error": "id requis"}, 400)
                 return
             removed = remove_saved_search(search_id)
-            self.send_json({"ok": bool(removed), "removed": removed}, 200 if removed else 404)
+            self.send_json({"ok": bool(removed), "removed": removed, "removed_ids": [search_id] if removed else []}, 200 if removed else 404)
 
         elif parsed.path == "/api/favorites/add":
             name = data.get("name", "")
@@ -3438,9 +3528,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True, "added": added, "favorites": get_favorites()})
 
         elif parsed.path == "/api/favorites/remove":
+            favorite_ids = data.get("favorite_ids")
+            if isinstance(favorite_ids, list):
+                removed, removed_ids = remove_favorites(favorite_ids)
+                self.send_json({"ok": True, "removed": removed, "removed_ids": removed_ids})
+                return
             ref = data.get("favorite_id") or data.get("link") or ""
-            removed = remove_favorite(ref)
-            self.send_json({"ok": True, "removed": removed})
+            removed, removed_ids = remove_favorites([ref])
+            self.send_json({"ok": True, "removed": removed, "removed_ids": removed_ids})
 
         elif parsed.path == "/api/favorites/download":
             favorite_ids = data.get("favorite_ids")

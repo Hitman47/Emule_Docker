@@ -249,5 +249,50 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(loaded['searches'][0]['query'], 'new')
 
 
+    def test_remove_favorites_supports_bulk_ids(self):
+        fav1 = server.add_favorite('One.iso', 'ed2k://|file|One.iso|1|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|/')
+        fav2 = server.add_favorite('Two.iso', 'ed2k://|file|Two.iso|2|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|/')
+        self.assertTrue(fav1)
+        self.assertTrue(fav2)
+        favorites = server.get_favorites()
+        ids = [favorites[0]['favorite_id'], favorites[1]['favorite_id']]
+        removed, removed_ids = server.remove_favorites(ids)
+        self.assertEqual(removed, 2)
+        self.assertEqual(set(removed_ids), set(ids))
+        self.assertEqual(server.get_favorites(), [])
+
+    def test_update_saved_search_can_rename_and_change_query(self):
+        ok, _ = server.add_saved_search('ubuntu', 'kad', 'Ubuntu base')
+        self.assertTrue(ok)
+        item = server.get_saved_searches()[0]
+        updated, message, changed = server.update_saved_search(item['id'], query='debian', search_type='global', label='Debian stable')
+        self.assertTrue(updated)
+        self.assertEqual(message, 'Recherche mise à jour')
+        self.assertEqual(changed['query'], 'debian')
+        self.assertEqual(changed['type'], 'global')
+        self.assertEqual(changed['label'], 'Debian stable')
+        reloaded = server.get_saved_searches()[0]
+        self.assertEqual(reloaded['key'], 'global::debian')
+
+    def test_update_saved_search_rejects_duplicate_target(self):
+        self.assertTrue(server.add_saved_search('ubuntu', 'kad', 'Ubuntu')[0])
+        self.assertTrue(server.add_saved_search('debian', 'global', 'Debian')[0])
+        items = sorted(server.get_saved_searches(), key=lambda x: x['query'])
+        debian = next(x for x in items if x['query'] == 'debian')
+        updated, message, changed = server.update_saved_search(debian['id'], query='ubuntu', search_type='kad')
+        self.assertFalse(updated)
+        self.assertEqual(message, 'Une recherche sauvegardée identique existe déjà')
+        self.assertIsNone(changed)
+
+    def test_remove_saved_searches_supports_bulk_ids(self):
+        self.assertTrue(server.add_saved_search('ubuntu', 'kad', 'Ubuntu')[0])
+        self.assertTrue(server.add_saved_search('debian', 'global', 'Debian')[0])
+        items = server.get_saved_searches()
+        removed, removed_ids = server.remove_saved_searches([items[0]['id'], items[1]['id']])
+        self.assertEqual(removed, 2)
+        self.assertEqual(set(removed_ids), {items[0]['id'], items[1]['id']})
+        self.assertEqual(server.get_saved_searches(), [])
+
+
 if __name__ == '__main__':
     unittest.main()

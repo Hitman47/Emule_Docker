@@ -346,8 +346,29 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
         <div class="label">🧠 Recherches sauvegardées</div>
-        <button class="btn btn-ghost btn-sm" onclick="loadSavedSearches()">🔄 Rafraîchir</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleSavedSearches(true)">☑ Affichées</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleSavedSearches(false)">☐ Désélectionner</button>
+          <button class="btn btn-ghost btn-sm" onclick="removeSelectedSavedSearches()" data-requires-write="1">✕ Suppr sélection</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadSavedSearches()">🔄 Rafraîchir</button>
+        </div>
       </div>
+      <div style="display:grid;grid-template-columns:1fr 180px;gap:8px;align-items:end;margin-bottom:10px">
+        <div>
+          <div class="label" style="margin-bottom:4px">Filtre</div>
+          <input type="text" id="savedSearchesFilter" placeholder="nom ou requête" oninput="applySavedSearchFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Tri</div>
+          <select id="savedSearchesSort" onchange="applySavedSearchFilters()">
+            <option value="recent_desc">Dernière exécution ↓</option>
+            <option value="created_desc">Création ↓</option>
+            <option value="runs_desc">Exécutions ↓</option>
+            <option value="label_asc">Label A→Z</option>
+          </select>
+        </div>
+      </div>
+      <div id="savedSearchesInfo" style="font-size:.76em;color:var(--text3);margin-bottom:8px">Aucune recherche sauvegardée</div>
       <div id="savedSearchesList"><div class="empty" style="padding:18px">Aucune recherche sauvegardée</div></div>
     </div>
 
@@ -398,10 +419,34 @@ tr:hover{background:var(--bg3)}
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
           <div class="label">⭐ Favoris sauvegardés</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <button class="btn btn-ghost btn-sm" onclick="toggleSelectAllFavorites(true)">☑ Tout sélectionner</button>
-            <button class="btn btn-ghost btn-sm" onclick="toggleSelectAllFavorites(false)">☐ Tout désélectionner</button>
+            <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleFavorites(true)">☑ Affichés</button>
+            <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleFavorites(false)">☐ Désélectionner</button>
             <button class="btn btn-primary btn-sm" onclick="downloadSelectedFavorites(this)" data-requires-write="1">⬇️ Télécharger sélection</button>
+            <button class="btn btn-ghost btn-sm" onclick="removeSelectedFavorites()" data-requires-write="1">✕ Suppr sélection</button>
             <button class="btn btn-ghost btn-sm" onclick="downloadAllFavorites(this)" data-requires-write="1">📦 Tout télécharger</button>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 170px 170px;gap:8px;align-items:end;margin-bottom:10px">
+          <div>
+            <div class="label" style="margin-bottom:4px">Filtre nom / requête</div>
+            <input type="text" id="favoritesNameFilter" placeholder="nom, query, type" oninput="applyFavoriteFilters()">
+          </div>
+          <div>
+            <div class="label" style="margin-bottom:4px">Type</div>
+            <select id="favoritesTypeFilter" onchange="applyFavoriteFilters()">
+              <option value="all">Tous</option>
+              <option value="search_result">Recherche</option>
+              <option value="ed2k_link">Lien ED2K</option>
+            </select>
+          </div>
+          <div>
+            <div class="label" style="margin-bottom:4px">Tri</div>
+            <select id="favoritesSort" onchange="applyFavoriteFilters()">
+              <option value="recent_desc">Ajout ↓</option>
+              <option value="name_asc">Nom A→Z</option>
+              <option value="sources_desc">Sources ↓</option>
+              <option value="size_desc">Taille ↓</option>
+            </select>
           </div>
         </div>
         <div id="favoritesInfo" style="font-size:.76em;color:var(--text3);margin-bottom:8px">Aucun favori</div>
@@ -835,6 +880,15 @@ function snapshotUiState() {
       minSources: document.getElementById('resultMinSources')?.value || '0',
       sort: document.getElementById('resultSort')?.value || 'sources_desc',
     },
+    favoritesFilters: {
+      name: document.getElementById('favoritesNameFilter')?.value || '',
+      type: document.getElementById('favoritesTypeFilter')?.value || 'all',
+      sort: document.getElementById('favoritesSort')?.value || 'recent_desc',
+    },
+    savedSearchesFilters: {
+      q: document.getElementById('savedSearchesFilter')?.value || '',
+      sort: document.getElementById('savedSearchesSort')?.value || 'recent_desc',
+    },
     downloadFilters: {
       name: document.getElementById('downloadNameFilter')?.value || '',
       status: document.getElementById('downloadStatusFilter')?.value || 'all',
@@ -876,6 +930,27 @@ function restoreUiState() {
     resultSort: resultFilters.sort,
   };
   Object.entries(rf).forEach(([id, value]) => {
+    if (value == null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  const favoritesFilters = state.favoritesFilters || {};
+  const ff = {
+    favoritesNameFilter: favoritesFilters.name,
+    favoritesTypeFilter: favoritesFilters.type,
+    favoritesSort: favoritesFilters.sort,
+  };
+  Object.entries(ff).forEach(([id, value]) => {
+    if (value == null) return;
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  const savedSearchesFilters = state.savedSearchesFilters || {};
+  const sf = {
+    savedSearchesFilter: savedSearchesFilters.q,
+    savedSearchesSort: savedSearchesFilters.sort,
+  };
+  Object.entries(sf).forEach(([id, value]) => {
     if (value == null) return;
     const el = document.getElementById(id);
     if (el) el.value = value;
@@ -1817,11 +1892,11 @@ async function handleBulkTransferAction(action, btn = null) {
 }
 
 // ── Favorites ──
-function updateFavoritesInfo(total = 0) {
+function updateFavoritesInfo(filteredCount = 0, totalCount = filteredCount) {
   const info = document.getElementById('favoritesInfo');
   if (!info) return;
   const selected = window._selectedFavoriteIds ? window._selectedFavoriteIds.size : 0;
-  info.textContent = `${total} favori(s) — ${selected} sélectionné(s)`;
+  info.textContent = `${filteredCount}/${totalCount} favori(s) — ${selected} sélectionné(s)`;
 }
 
 function renderFavoriteDownloadReport(payload) {
@@ -1855,7 +1930,7 @@ function renderFavoriteDownloadReport(payload) {
 async function saveFavorite(resultId) {
   const r = (window._lastResultsAll || []).find(x => x.id === resultId);
   if (!r) { showToast('err', 'Résultat introuvable'); return; }
-  const query = document.getElementById('searchInput')?.value || '';
+  const query = document.getElementById('searchQuery')?.value || '';
   const searchType = document.getElementById('searchType')?.value || 'kad';
   const link = 'ed2k://|search_result|' + resultId + '|' + encodeURIComponent(r.name) + '|/';
   const resp = await fetch('/api/favorites/add', {
@@ -1888,21 +1963,95 @@ function toggleFavorites() {
   }
 }
 
+function getFavoriteFilters() {
+  if (!window._favoriteFilters) window._favoriteFilters = {name: '', type: 'all', sort: 'recent_desc'};
+  window._favoriteFilters = {
+    name: document.getElementById('favoritesNameFilter')?.value || '',
+    type: document.getElementById('favoritesTypeFilter')?.value || 'all',
+    sort: document.getElementById('favoritesSort')?.value || 'recent_desc',
+  };
+  writeUiState({favoritesFilters: {...window._favoriteFilters}});
+  return window._favoriteFilters;
+}
+
+function applyFavoriteFilters() {
+  renderFavorites();
+}
+
 function toggleFavoriteSelection(id, checked) {
   if (!window._selectedFavoriteIds) window._selectedFavoriteIds = new Set();
   if (checked) window._selectedFavoriteIds.add(id);
   else window._selectedFavoriteIds.delete(id);
-  updateFavoritesInfo((window._favorites || []).length);
+  updateFavoritesInfo((window._filteredFavorites || []).length, (window._favorites || []).length);
 }
 
-function toggleSelectAllFavorites(checked) {
+function toggleSelectVisibleFavorites(checked) {
   if (!window._selectedFavoriteIds) window._selectedFavoriteIds = new Set();
-  const favorites = window._favorites || [];
+  const favorites = window._filteredFavorites || window._favorites || [];
   favorites.forEach(f => {
     if (checked) window._selectedFavoriteIds.add(f.favorite_id);
     else window._selectedFavoriteIds.delete(f.favorite_id);
   });
-  loadFavorites();
+  renderFavorites();
+}
+
+function sortFavorites(items, sortKey) {
+  const list = [...items];
+  const sorters = {
+    recent_desc: (a, b) => (b.created_ts || 0) - (a.created_ts || 0) || (b.sources || 0) - (a.sources || 0),
+    name_asc: (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'fr', {sensitivity: 'base'}),
+    sources_desc: (a, b) => (b.sources || 0) - (a.sources || 0) || (b.created_ts || 0) - (a.created_ts || 0),
+    size_desc: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0) || (b.sources || 0) - (a.sources || 0),
+  };
+  list.sort(sorters[sortKey] || sorters.recent_desc);
+  return list;
+}
+
+function renderFavorites() {
+  const favs = window._favorites || [];
+  const filters = getFavoriteFilters();
+  const needle = String(filters.name || '').trim().toLowerCase();
+  const filtered = favs.filter(f => {
+    if (filters.type && filters.type !== 'all' && String(f.kind || '') !== filters.type) return false;
+    if (needle) {
+      const hay = [f.name, f.query, f.kind === 'search_result' ? 'recherche' : 'ed2k', f.search_type].join(' ').toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
+    return true;
+  });
+  window._filteredFavorites = sortFavorites(filtered, filters.sort);
+  const selected = new Set([...(window._selectedFavoriteIds || new Set())].filter(id => favs.some(f => f.favorite_id === id)));
+  window._selectedFavoriteIds = selected;
+  const container = document.getElementById('favoritesList');
+  if (!window._filteredFavorites.length) {
+    updateFavoritesInfo(0, favs.length);
+    container.innerHTML = '<div class="empty" style="padding:12px">Aucun favori correspondant</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th><input type="checkbox" onclick="toggleSelectVisibleFavorites(this.checked)"></th><th>Nom</th><th>Type</th><th>Taille</th><th>Sources</th><th>Ajouté</th><th></th></tr></thead><tbody>';
+  window._filteredFavorites.forEach(f => {
+    const checked = selected.has(f.favorite_id) ? 'checked' : '';
+    const kindLabel = f.kind === 'search_result' ? 'Recherche' : 'Lien ED2K';
+    const safeId = esc(String(f.favorite_id || '').replace(/'/g, "\'"));
+    const metaTitle = f.kind === 'search_result' && f.query ? `${f.name || ''}
+Query: ${f.query}
+Type: ${f.search_type || 'kad'}` : (f.name || '');
+    html += `<tr>
+      <td><input type="checkbox" ${checked} onchange="toggleFavoriteSelection('${safeId}', this.checked)"></td>
+      <td class="fname" title="${esc(metaTitle)}">${esc(f.name)}</td>
+      <td>${esc(kindLabel)}</td>
+      <td>${esc(f.size) || '—'}</td>
+      <td>${f.sources || '—'}</td>
+      <td style="font-size:.78em;color:var(--text3)">${esc(f.added)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-primary btn-sm" onclick="downloadFavoriteItem('${safeId}', this)" title="Télécharger" ${readonlyDisabledAttr()}>⬇️</button>
+        <button class="btn btn-ghost btn-sm" onclick="removeFavoriteItem('${safeId}')" title="Supprimer" ${readonlyDisabledAttr()}>✕</button>
+      </td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+  updateFavoritesInfo(window._filteredFavorites.length, favs.length);
 }
 
 async function loadFavorites() {
@@ -1912,33 +2061,7 @@ async function loadFavorites() {
   window._favorites = favs;
   const selected = new Set([...(window._selectedFavoriteIds || new Set())].filter(id => favs.some(f => f.favorite_id === id)));
   window._selectedFavoriteIds = selected;
-  const container = document.getElementById('favoritesList');
-  if (!favs.length) {
-    updateFavoritesInfo(0);
-    container.innerHTML = '<div class="empty" style="padding:12px">Aucun favori sauvegardé</div>';
-    return;
-  }
-  let html = '<table><thead><tr><th><input type="checkbox" onclick="toggleSelectAllFavorites(this.checked)"></th><th>Nom</th><th>Type</th><th>Taille</th><th>Sources</th><th>Ajouté</th><th></th></tr></thead><tbody>';
-  favs.forEach(f => {
-    const checked = selected.has(f.favorite_id) ? 'checked' : '';
-    const kindLabel = f.kind === 'search_result' ? 'Recherche' : 'Lien ED2K';
-    const safeId = esc(String(f.favorite_id || '').replace(/'/g, "\'"));
-    html += `<tr>
-      <td><input type="checkbox" ${checked} onchange="toggleFavoriteSelection('${safeId}', this.checked)"></td>
-      <td class="fname" title="${esc(f.name)}">${esc(f.name)}</td>
-      <td>${esc(kindLabel)}</td>
-      <td>${esc(f.size) || '—'}</td>
-      <td>${f.sources || '—'}</td>
-      <td style="font-size:.78em;color:var(--text3)">${esc(f.added)}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-primary btn-sm" onclick="downloadFavoriteItem('${safeId}', this)" title="Télécharger" ${readonlyDisabledAttr()}>⬇️</button>
-        <button class="btn btn-ghost btn-sm" onclick="removeFavoriteItem('${safeId}')" title="Supprimer">✕</button>
-      </td>
-    </tr>`;
-  });
-  html += '</tbody></table>';
-  container.innerHTML = html;
-  updateFavoritesInfo(favs.length);
+  renderFavorites();
 }
 
 async function downloadFavoriteItem(favoriteId, btn = null) {
@@ -2013,14 +2136,42 @@ async function downloadAllFavorites(btn = null) {
 }
 
 async function removeFavoriteItem(favoriteId) {
-  await fetch('/api/favorites/remove', {
+  if (!ensureWritable('La suppression de favori')) return;
+  const resp = await fetch('/api/favorites/remove', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({favorite_id: favoriteId})
   });
+  const d = await resp.json();
+  if (!resp.ok || !d?.ok) {
+    showToast('err', d?.error || 'Suppression impossible');
+    return;
+  }
   window._selectedFavoriteIds?.delete(favoriteId);
-  loadFavorites();
-  loadFavoritesCount();
-  showToast('ok', 'Favori supprimé');
+  await loadFavorites();
+  await loadFavoritesCount();
+  showToast('ok', d.removed ? 'Favori supprimé' : 'Favori introuvable');
+}
+
+async function removeSelectedFavorites() {
+  if (!ensureWritable('La suppression de favoris')) return;
+  const ids = [...(window._selectedFavoriteIds || new Set())];
+  if (!ids.length) {
+    showToast('info', 'Aucun favori sélectionné');
+    return;
+  }
+  const resp = await fetch('/api/favorites/remove', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({favorite_ids: ids})
+  });
+  const d = await resp.json();
+  if (!resp.ok || !d?.ok) {
+    showToast('err', d?.error || 'Suppression impossible');
+    return;
+  }
+  (d.removed_ids || []).forEach(id => window._selectedFavoriteIds?.delete(id));
+  await loadFavorites();
+  await loadFavoritesCount();
+  showToast('ok', `${d.removed || 0} favori(s) supprimé(s)`);
 }
 
 async function loadFavoritesCount() {
@@ -2033,33 +2184,85 @@ async function loadFavoritesCount() {
   } else {
     badge.style.display = 'none';
   }
-  updateFavoritesInfo(count);
+  updateFavoritesInfo((window._filteredFavorites || []).length || count, count);
 }
 
-// ── Search History Suggestions ──
-let _searchHistory = [];
-
-async function loadSearchHistory() {
-  const d = await api('/api/search_history');
-  if (d) _searchHistory = d.searches || [];
+function getSavedSearchFilters() {
+  if (!window._savedSearchFilters) window._savedSearchFilters = {q: '', sort: 'recent_desc'};
+  window._savedSearchFilters = {
+    q: document.getElementById('savedSearchesFilter')?.value || '',
+    sort: document.getElementById('savedSearchesSort')?.value || 'recent_desc',
+  };
+  writeUiState({savedSearchesFilters: {...window._savedSearchFilters}});
+  return window._savedSearchFilters;
 }
 
-async function loadSavedSearches() {
-  const d = await api('/api/saved_searches');
+function updateSavedSearchesInfo(filteredCount = 0, totalCount = filteredCount) {
+  const info = document.getElementById('savedSearchesInfo');
+  if (!info) return;
+  const selected = window._selectedSavedSearchIds ? window._selectedSavedSearchIds.size : 0;
+  info.textContent = `${filteredCount}/${totalCount} recherche(s) — ${selected} sélectionnée(s)`;
+}
+
+function toggleSavedSearchSelection(id, checked) {
+  if (!window._selectedSavedSearchIds) window._selectedSavedSearchIds = new Set();
+  if (checked) window._selectedSavedSearchIds.add(id);
+  else window._selectedSavedSearchIds.delete(id);
+  updateSavedSearchesInfo((window._filteredSavedSearches || []).length, (window._savedSearches || []).length);
+}
+
+function toggleSelectVisibleSavedSearches(checked) {
+  if (!window._selectedSavedSearchIds) window._selectedSavedSearchIds = new Set();
+  const items = window._filteredSavedSearches || window._savedSearches || [];
+  items.forEach(item => {
+    if (checked) window._selectedSavedSearchIds.add(item.id);
+    else window._selectedSavedSearchIds.delete(item.id);
+  });
+  renderSavedSearches();
+}
+
+function applySavedSearchFilters() {
+  renderSavedSearches();
+}
+
+function renderSavedSearches() {
   const container = document.getElementById('savedSearchesList');
   if (!container) return;
-  const saved = d?.saved_searches || [];
-  if (!saved.length) {
-    container.innerHTML = '<div class="empty" style="padding:18px">Aucune recherche sauvegardée</div>';
+  const saved = window._savedSearches || [];
+  const filters = getSavedSearchFilters();
+  const needle = String(filters.q || '').trim().toLowerCase();
+  const filtered = saved.filter(item => {
+    if (!needle) return true;
+    const hay = [item.label, item.query, item.type].join(' ').toLowerCase();
+    return hay.includes(needle);
+  });
+  const sorters = {
+    recent_desc: (a, b) => (b.last_run_ts || 0) - (a.last_run_ts || 0) || (b.created_ts || 0) - (a.created_ts || 0),
+    created_desc: (a, b) => (b.created_ts || 0) - (a.created_ts || 0),
+    runs_desc: (a, b) => (b.run_count || 0) - (a.run_count || 0) || (b.last_run_ts || 0) - (a.last_run_ts || 0),
+    label_asc: (a, b) => String(a.label || '').localeCompare(String(b.label || ''), 'fr', {sensitivity: 'base'}),
+  };
+  filtered.sort(sorters[filters.sort] || sorters.recent_desc);
+  window._filteredSavedSearches = filtered;
+  const selected = new Set([...(window._selectedSavedSearchIds || new Set())].filter(id => saved.some(item => item.id === id)));
+  window._selectedSavedSearchIds = selected;
+  if (!filtered.length) {
+    updateSavedSearchesInfo(0, saved.length);
+    container.innerHTML = '<div class="empty" style="padding:18px">Aucune recherche sauvegardée correspondante</div>';
     return;
   }
-  container.innerHTML = '<div class="saved-search-grid">' + saved.map(item => `
+  container.innerHTML = '<div class="saved-search-grid">' + filtered.map(item => {
+    const checked = selected.has(item.id) ? 'checked' : '';
+    return `
     <div class="saved-search-item">
-      <div class="saved-search-top">
-        <div>
-          <div style="font-weight:700">${esc(item.label || item.query || 'Recherche')}</div>
-          <div style="font-size:.82em;color:var(--text2);margin-top:2px">${esc(item.query || '')}</div>
-        </div>
+      <div class="saved-search-top" style="align-items:flex-start;gap:10px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-right:auto">
+          <input type="checkbox" ${checked} onchange="toggleSavedSearchSelection('${item.id}', this.checked)">
+          <div>
+            <div style="font-weight:700">${esc(item.label || item.query || 'Recherche')}</div>
+            <div style="font-size:.82em;color:var(--text2);margin-top:2px">${esc(item.query || '')}</div>
+          </div>
+        </label>
         <span class="pill info" style="padding:3px 8px">${esc((item.type || 'kad').toUpperCase())}</span>
       </div>
       <div class="saved-search-meta">
@@ -2068,11 +2271,20 @@ async function loadSavedSearches() {
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
         <button class="btn btn-primary btn-sm" onclick="runSavedSearch('${item.id}')">▶ Lancer</button>
-        <button class="btn btn-ghost btn-sm" onclick="removeSavedSearch('${item.id}')">✕ Supprimer</button>
+        <button class="btn btn-ghost btn-sm" onclick="editSavedSearch('${item.id}')" data-requires-write="1" ${readonlyDisabledAttr()}>✎ Éditer</button>
+        <button class="btn btn-ghost btn-sm" onclick="removeSavedSearch('${item.id}')" data-requires-write="1" ${readonlyDisabledAttr()}>✕ Supprimer</button>
       </div>
-    </div>
-  `).join('') + '</div>';
-  window._savedSearches = saved;
+    </div>`;
+  }).join('') + '</div>';
+  updateSavedSearchesInfo(filtered.length, saved.length);
+}
+
+async function loadSavedSearches() {
+  const d = await api('/api/saved_searches');
+  window._savedSearches = d?.saved_searches || [];
+  const selected = new Set([...(window._selectedSavedSearchIds || new Set())].filter(id => (window._savedSearches || []).some(item => item.id === id)));
+  window._selectedSavedSearchIds = selected;
+  renderSavedSearches();
 }
 
 async function saveCurrentSearch() {
@@ -2109,7 +2321,35 @@ async function runSavedSearch(searchId) {
   loadSavedSearches();
 }
 
+async function editSavedSearch(searchId) {
+  if (!ensureWritable("La modification d'une recherche sauvegardée")) return;
+  const item = (window._savedSearches || []).find(x => x.id === searchId);
+  if (!item) {
+    showToast('err', 'Recherche sauvegardée introuvable');
+    return;
+  }
+  const label = prompt('Label affiché', item.label || item.query || '');
+  if (label === null) return;
+  const query = prompt('Requête', item.query || '');
+  if (query === null) return;
+  const type = prompt('Type (kad/global/local)', item.type || 'kad');
+  if (type === null) return;
+  const resp = await fetch('/api/saved_searches/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: searchId, label, query, type})
+  });
+  const d = await resp.json();
+  if (d.ok) {
+    showToast('ok', d.message || 'Recherche mise à jour');
+    await loadSavedSearches();
+  } else {
+    showToast(resp.status === 409 ? 'info' : 'err', d.error || 'Mise à jour impossible');
+  }
+}
+
 async function removeSavedSearch(searchId) {
+  if (!ensureWritable('La suppression de recherche sauvegardée')) return;
   const resp = await fetch('/api/saved_searches/remove', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -2117,11 +2357,42 @@ async function removeSavedSearch(searchId) {
   });
   const d = await resp.json();
   if (d.ok) {
+    window._selectedSavedSearchIds?.delete(searchId);
     showToast('ok', 'Recherche supprimée');
     loadSavedSearches();
   } else {
     showToast('err', d.error || 'Suppression impossible');
   }
+}
+
+async function removeSelectedSavedSearches() {
+  if (!ensureWritable('La suppression de recherches sauvegardées')) return;
+  const ids = [...(window._selectedSavedSearchIds || new Set())];
+  if (!ids.length) {
+    showToast('info', 'Aucune recherche sauvegardée sélectionnée');
+    return;
+  }
+  const resp = await fetch('/api/saved_searches/remove', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids})
+  });
+  const d = await resp.json();
+  if (d.ok) {
+    (d.removed_ids || []).forEach(id => window._selectedSavedSearchIds?.delete(id));
+    showToast('ok', `${d.removed || 0} recherche(s) supprimée(s)`);
+    loadSavedSearches();
+  } else {
+    showToast('err', d.error || 'Suppression impossible');
+  }
+}
+
+// ── Search History Suggestions ──
+let _searchHistory = [];
+
+async function loadSearchHistory() {
+  const d = await api('/api/search_history');
+  if (d) _searchHistory = d.searches || [];
 }
 
 function showSearchSuggestions(val) {
