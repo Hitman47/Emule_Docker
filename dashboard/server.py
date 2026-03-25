@@ -1105,6 +1105,7 @@ HISTORY_FILE = os.path.join(AMULE_HOME, "dashboard-history.json")
 MAX_SEARCH_HISTORY = 50
 MAX_FAVORITES = 200
 MAX_SAVED_SEARCHES = 40
+APP_EXPORT_VERSION = 1
 
 
 def _normalize_history_shape(data):
@@ -1132,6 +1133,129 @@ def _save_history(data):
         return True
     except Exception:
         return False
+
+
+def _merge_unique(items, key_fn, limit=None):
+    merged = []
+    seen = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            key = key_fn(item)
+        except Exception:
+            key = None
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if limit and len(merged) >= limit:
+            break
+    return merged
+
+
+def build_export_bundle(include_action_history=False, include_stats=False):
+    history = _load_history()
+    bundle_history = {
+        "searches": list(history.get("searches", []))[:MAX_SEARCH_HISTORY],
+        "favorites": list(history.get("favorites", []))[:MAX_FAVORITES],
+        "saved_searches": list(history.get("saved_searches", []))[:MAX_SAVED_SEARCHES],
+    }
+    if include_action_history:
+        bundle_history["action_history"] = get_action_history(get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"]))
+    bundle = {
+        "format": "amule_dashboard_bundle",
+        "version": APP_EXPORT_VERSION,
+        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "settings": load_settings(),
+        "history": bundle_history,
+        "meta": {
+            "favorites": len(bundle_history.get("favorites", [])),
+            "saved_searches": len(bundle_history.get("saved_searches", [])),
+            "search_history": len(bundle_history.get("searches", [])),
+            "action_history": len(bundle_history.get("action_history", [])),
+        },
+    }
+    if include_stats:
+        bundle["stats"] = _load_stats()
+    return bundle
+
+
+def import_dashboard_bundle(bundle, mode="merge"):
+    if isinstance(bundle, str):
+        bundle = json.loads(bundle)
+    if not isinstance(bundle, dict):
+        raise ValueError("Bundle invalide")
+    if bundle.get("format") != "amule_dashboard_bundle":
+        raise ValueError("Format de bundle non reconnu")
+    mode = str(mode or "merge").strip().lower()
+    if mode not in ("merge", "replace"):
+        mode = "merge"
+
+    incoming_settings = normalize_settings(bundle.get("settings"))
+    incoming_history = _normalize_history_shape(bundle.get("history"))
+
+    current_settings = load_settings()
+    current_history = _load_history()
+
+    if mode == "replace":
+        final_settings = incoming_settings
+        final_history = {
+            "searches": list(incoming_history.get("searches", []))[:MAX_SEARCH_HISTORY],
+            "favorites": list(incoming_history.get("favorites", []))[:MAX_FAVORITES],
+            "saved_searches": list(incoming_history.get("saved_searches", []))[:MAX_SAVED_SEARCHES],
+            "action_history": list(incoming_history.get("action_history", []))[: get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"])],
+        }
+    else:
+        final_settings = normalize_settings(current_settings)
+        incoming_sources = incoming_settings.get("server_sources", [])
+        current_sources = final_settings.get("server_sources", [])
+        final_settings["server_sources"] = _merge_unique(
+            list(incoming_sources) + list(current_sources),
+            lambda item: (item.get("url") or item.get("key") or "").strip().lower(),
+        )
+        if incoming_settings.get("last_scan") and not final_settings.get("last_scan"):
+            final_settings["last_scan"] = incoming_settings.get("last_scan")
+        final_settings["dashboard"] = normalize_dashboard_config({**final_settings.get("dashboard", {}), **incoming_settings.get("dashboard", {})})
+
+        final_history = {
+            "searches": _merge_unique(list(incoming_history.get("searches", [])) + list(current_history.get("searches", [])),
+                                      lambda item: f"{str(item.get('type') or '').lower()}::{str(item.get('query') or '').strip().lower()}",
+                                      MAX_SEARCH_HISTORY),
+            "favorites": _merge_unique(list(incoming_history.get("favorites", [])) + list(current_history.get("favorites", [])),
+                                       lambda item: str(item.get("link") or "").strip().lower(),
+                                       MAX_FAVORITES),
+            "saved_searches": _merge_unique(list(incoming_history.get("saved_searches", [])) + list(current_history.get("saved_searches", [])),
+                                            lambda item: str(item.get("key") or item.get("id") or "").strip().lower(),
+                                            MAX_SAVED_SEARCHES),
+            "action_history": _merge_unique(list(incoming_history.get("action_history", [])) + list(current_history.get("action_history", [])),
+                                            lambda item: f"{item.get('ts') or 0}:{item.get('action') or ''}:{item.get('target') or ''}:{item.get('code') or ''}",
+                                            get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"])),
+        }
+
+    if not save_settings(final_settings):
+        raise RuntimeError("Impossible de sauvegarder les paramètres importés")
+    if not _save_history(final_history):
+        raise RuntimeError("Impossible de sauvegarder l'historique importé")
+
+    global SERVER_SOURCES
+    SERVER_SOURCES = get_server_sources_from_settings()
+    init_action_history_store()
+
+    return {
+        "mode": mode,
+        "settings": {
+            "server_sources": len(final_settings.get("server_sources", [])),
+            "read_only": bool(final_settings.get("dashboard", {}).get("read_only")),
+            "refresh_interval_sec": final_settings.get("dashboard", {}).get("refresh_interval_sec"),
+        },
+        "history": {
+            "searches": len(final_history.get("searches", [])),
+            "favorites": len(final_history.get("favorites", [])),
+            "saved_searches": len(final_history.get("saved_searches", [])),
+            "action_history": len(final_history.get("action_history", [])),
+        },
+    }
 
 
 def init_action_history_store():
@@ -1856,6 +1980,47 @@ def build_debug_snapshot():
     return diag
 
 
+def classify_log_level(line):
+    low = str(line or "").lower()
+    if any(token in low for token in ("error", "exception", "fatal", "traceback", "failed")):
+        return "error"
+    if any(token in low for token in ("warn", "warning")):
+        return "warn"
+    if any(token in low for token in ("info", "notice", "ok")):
+        return "info"
+    return "other"
+
+
+def filter_log_lines(lines, level="all", contains="", limit=120):
+    try:
+        limit = max(1, min(500, int(limit)))
+    except Exception:
+        limit = 120
+    level = str(level or "all").strip().lower()
+    contains = str(contains or "").strip().lower()
+    tail = list(lines or [])[-1000:]
+    filtered = []
+    counts = {"error": 0, "warn": 0, "info": 0, "other": 0}
+    for line in tail:
+        lvl = classify_log_level(line)
+        counts[lvl] = counts.get(lvl, 0) + 1
+        if level != "all" and lvl != level:
+            continue
+        if contains and contains not in str(line).lower():
+            continue
+        filtered.append(line)
+    return {
+        "lines": filtered[-limit:],
+        "counts": counts,
+        "returned": min(len(filtered), limit),
+        "matched_total": len(filtered),
+        "available_total": len(tail),
+        "level": level,
+        "contains": contains,
+        "limit": limit,
+    }
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -2120,6 +2285,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/app_config":
             self.send_json({"ok": True, "config": get_dashboard_config(), "read_only": is_read_only_enabled()})
 
+        elif path == "/api/export_bundle":
+            include_action_history = qs.get("include_action_history", ["0"])[0] in ("1", "true", "yes")
+            include_stats = qs.get("include_stats", ["0"])[0] in ("1", "true", "yes")
+            self.send_json(build_export_bundle(include_action_history=include_action_history, include_stats=include_stats))
+
         elif path == "/api/debug":
             self.send_json(build_debug_snapshot())
 
@@ -2175,16 +2345,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Mode debug désactivé"}, 403)
                 return
             log_name = qs.get("name", [""])[0]
+            level = qs.get("level", ["all"])[0]
+            contains = qs.get("contains", [""])[0]
+            lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
                           "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log"}
             if log_name in valid_logs:
                 try:
                     with open(valid_logs[log_name], "r") as f:
-                        lines = f.readlines()
-                    self.send_json({"ok": True, "lines": lines[-100:]})
+                        payload = filter_log_lines(f.readlines(), level=level, contains=contains, limit=lines_limit)
+                    payload.update({"ok": True, "name": log_name})
+                    self.send_json(payload)
                 except FileNotFoundError:
-                    self.send_json({"ok": True, "lines": ["(aucun log encore)"]})
+                    self.send_json({"ok": True, "name": log_name, "lines": ["(aucun log encore)"], "counts": {"error": 0, "warn": 0, "info": 0, "other": 0}, "returned": 1, "matched_total": 1, "available_total": 0, "level": level, "contains": contains, "limit": int(lines_limit or 120)})
             else:
                 self.send_json({"error": "Log inconnu"}, 400)
 
@@ -2271,6 +2445,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "config": settings["dashboard"]})
             else:
                 self.send_json({"ok": False, "error": "Impossible de sauvegarder la configuration"}, 500)
+            return
+
+        if parsed.path == "/api/import_bundle":
+            blocked = guard_write_action(self, "import_bundle")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            raw_bundle = data.get("bundle")
+            mode = str(data.get("mode") or "merge")
+            if raw_bundle is None:
+                self.send_json({"ok": False, "error": "Bundle requis"}, 400)
+                return
+            try:
+                summary = import_dashboard_bundle(raw_bundle, mode=mode)
+                self.send_json({"ok": True, "summary": summary, "config": get_dashboard_config()})
+            except json.JSONDecodeError:
+                self.send_json({"ok": False, "error": "JSON du bundle invalide"}, 400)
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 500)
             return
 
         blocked = guard_write_action(self, parsed.path.rsplit('/', 1)[-1])

@@ -635,6 +635,30 @@ tr:hover{background:var(--bg3)}
       </div>
     </div>
 
+    <!-- Backup / Import -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">💾 Sauvegarde & import</div>
+      <p style="color:var(--text2);font-size:.84em;line-height:1.5;margin-bottom:12px">
+        Exporte la configuration, les sources, les favoris et les recherches sauvegardées. L'import peut <strong>fusionner</strong> ou <strong>remplacer</strong> l'existant.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn btn-primary btn-sm" onclick="exportBundle(false)">📤 Export simple</button>
+        <button class="btn btn-ghost btn-sm" onclick="exportBundle(true)">📤 Export complet</button>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(140px,180px) 1fr auto;gap:8px;align-items:start;margin-bottom:8px">
+        <select id="bundleImportMode" style="padding:8px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none">
+          <option value="merge">Fusionner</option>
+          <option value="replace">Remplacer</option>
+        </select>
+        <input id="bundleFileInput" type="file" accept="application/json,.json" onchange="loadBundleFile(event)"
+          style="padding:8px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82em;outline:none;width:100%">
+        <button class="btn btn-ghost btn-sm" onclick="importBundleFromTextarea()" data-requires-write="1">📥 Importer</button>
+      </div>
+      <textarea id="bundleImportText" placeholder="Colle ici le JSON exporté si tu ne veux pas passer par un fichier..."
+        style="width:100%;min-height:120px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.8em;outline:none;resize:vertical"></textarea>
+      <div id="bundleImportMsg" class="msg" style="margin-top:8px"></div>
+    </div>
+
     <!-- Recent action history -->
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
@@ -649,13 +673,39 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:10px">📋 Logs</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-        <button class="btn btn-ghost btn-sm" onclick="showLog('kad-monitor')">Kad Monitor</button>
-        <button class="btn btn-ghost btn-sm" onclick="showLog('source-scanner')">Source Scanner</button>
-        <button class="btn btn-ghost btn-sm" onclick="showLog('server-update')">MAJ Serveurs</button>
-        <button class="btn btn-ghost btn-sm" onclick="showLog('file-organizer')">Organiseur</button>
-        <button class="btn btn-ghost btn-sm" onclick="showLog('backup')">Backup</button>
-        <button class="btn btn-ghost btn-sm" onclick="showLog('stall-detector')">Stall Detector</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('kad-monitor')">Kad Monitor</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('source-scanner')">Source Scanner</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('server-update')">MAJ Serveurs</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('file-organizer')">Organiseur</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('backup')">Backup</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('stall-detector')">Stall Detector</button>
       </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:8px">
+        <select id="logNameSelect" onchange="showLog()" style="padding:8px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82em;outline:none">
+          <option value="kad-monitor">Kad Monitor</option>
+          <option value="source-scanner">Source Scanner</option>
+          <option value="server-update">MAJ Serveurs</option>
+          <option value="file-organizer">Organiseur</option>
+          <option value="backup">Backup</option>
+          <option value="stall-detector">Stall Detector</option>
+        </select>
+        <select id="logLevelFilter" onchange="showLog()" style="padding:8px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82em;outline:none">
+          <option value="all">Tous niveaux</option>
+          <option value="error">Erreurs</option>
+          <option value="warn">Warnings</option>
+          <option value="info">Info</option>
+          <option value="other">Autres</option>
+        </select>
+        <input id="logContains" type="text" placeholder="Filtre texte" onkeydown="if(event.key==='Enter')showLog()"
+          style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82em;outline:none">
+        <input id="logLinesCount" type="number" min="10" max="500" value="120" onchange="showLog()"
+          style="padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82em;outline:none">
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-primary btn-sm" onclick="showLog()">🔄 Charger</button>
+        <button class="btn btn-ghost btn-sm" onclick="copyLogViewer()">📋 Copier</button>
+      </div>
+      <div id="logSummary" style="font-size:.76em;color:var(--text3);margin-bottom:8px">Sélectionne un log</div>
       <pre id="logViewer" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:250px;overflow:auto;white-space:pre-wrap;word-break:break-all">Sélectionne un log ci-dessus</pre>
     </div>
 
@@ -710,6 +760,8 @@ let appConfig = null;
 window._downloadsAll = [];
 window._filteredDownloads = [];
 window._selectedDownloadHashes = new Set();
+window._currentLogName = 'kad-monitor';
+window._logViewerText = '';
 
 // ── Tab navigation ──
 document.querySelectorAll('.tab').forEach(t => {
@@ -722,7 +774,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'downloads') loadDownloads();
     if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
-    if (t.dataset.tab === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(); runDebug(); }
+    if (t.dataset.tab === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(); runDebug(); showLog(window._currentLogName || 'kad-monitor'); }
     if (t.dataset.tab === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
   });
 });
@@ -2073,16 +2125,112 @@ async function connectED2K() {
   setTimeout(() => { if (msg && msg.classList.contains('show')) msg.classList.remove('show'); }, 15000);
 }
 
-// ── Logs ──
-async function showLog(name) {
-  const viewer = document.getElementById('logViewer');
-  viewer.textContent = 'Chargement...';
-  const d = await api('/api/logs?name=' + name);
-  if (d && d.lines) {
-    viewer.textContent = d.lines.join('') || '(vide)';
-    viewer.scrollTop = viewer.scrollHeight;
+// ── Export / Import bundle ──
+async function exportBundle(includeFull = false) {
+  const suffix = includeFull ? '?include_action_history=1&include_stats=1' : '';
+  const d = await api('/api/export_bundle' + suffix);
+  if (!d) return;
+  const blob = new Blob([JSON.stringify(d, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+  a.href = URL.createObjectURL(blob);
+  a.download = `amule-dashboard-${includeFull ? 'full' : 'simple'}-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  showToast('ok', 'Bundle exporté');
+}
+
+function loadBundleFile(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const area = document.getElementById('bundleImportText');
+    if (area) area.value = String(reader.result || '');
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+async function importBundleFromTextarea() {
+  if (!ensureWritable("L'import")) return;
+  const msg = document.getElementById('bundleImportMsg');
+  const area = document.getElementById('bundleImportText');
+  const mode = document.getElementById('bundleImportMode')?.value || 'merge';
+  const bundle = (area?.value || '').trim();
+  if (!bundle) {
+    if (msg) { msg.className = 'msg err show'; msg.textContent = 'Colle un bundle JSON ou choisis un fichier'; }
+    return;
+  }
+  if (msg) { msg.className = 'msg info show'; msg.textContent = 'Import en cours...'; }
+  const resp = await fetch('/api/import_bundle', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bundle, mode})
+  });
+  const d = await resp.json();
+  if (d?.ok) {
+    const h = d.summary?.history || {};
+    const summary = `${mode === 'replace' ? 'Import remplacement' : 'Import fusion'} OK · ${h.saved_searches || 0} recherches · ${h.favorites || 0} favoris`;
+    if (msg) { msg.className = 'msg ok show'; msg.textContent = summary; }
+    showToast('ok', summary);
+    await loadAppConfig();
+    await loadSettings();
+    await loadSavedSearches();
+    await loadSearchHistory();
+    await loadActionHistory();
+    await loadStatus();
+    await loadDownloads();
   } else {
-    viewer.textContent = '(erreur ou log introuvable)';
+    const err = d?.error || 'Import impossible';
+    if (msg) { msg.className = 'msg err show'; msg.textContent = err; }
+    showToast('err', err);
+  }
+}
+
+// ── Logs ──
+function setLogName(name) {
+  window._currentLogName = name;
+  const select = document.getElementById('logNameSelect');
+  if (select) select.value = name;
+  showLog();
+}
+
+async function showLog(name = '') {
+  if (name) window._currentLogName = name;
+  const viewer = document.getElementById('logViewer');
+  const summary = document.getElementById('logSummary');
+  const logName = document.getElementById('logNameSelect')?.value || window._currentLogName || 'kad-monitor';
+  const level = document.getElementById('logLevelFilter')?.value || 'all';
+  const contains = encodeURIComponent(document.getElementById('logContains')?.value || '');
+  const lines = document.getElementById('logLinesCount')?.value || '120';
+  viewer.textContent = 'Chargement...';
+  if (summary) summary.textContent = 'Chargement du log...';
+  const d = await api(`/api/logs?name=${encodeURIComponent(logName)}&level=${encodeURIComponent(level)}&contains=${contains}&lines=${encodeURIComponent(lines)}`);
+  if (d && d.lines) {
+    window._logViewerText = d.lines.join('') || '(vide)';
+    viewer.textContent = window._logViewerText;
+    viewer.scrollTop = viewer.scrollHeight;
+    const c = d.counts || {};
+    if (summary) summary.textContent = `${logName} · ${d.returned || 0}/${d.matched_total || 0} ligne(s) affichées · E ${c.error || 0} · W ${c.warn || 0} · I ${c.info || 0} · O ${c.other || 0}`;
+  } else {
+    window._logViewerText = '(erreur ou log introuvable)';
+    viewer.textContent = window._logViewerText;
+    if (summary) summary.textContent = 'Impossible de charger ce log';
+  }
+}
+
+async function copyLogViewer() {
+  const text = window._logViewerText || document.getElementById('logViewer')?.textContent || '';
+  if (!text) {
+    showToast('err', 'Aucun log à copier');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('ok', 'Log copié');
+  } catch {
+    showToast('err', 'Copie impossible');
   }
 }
 
