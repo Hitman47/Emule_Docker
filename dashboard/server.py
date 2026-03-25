@@ -132,6 +132,10 @@ AUTH_TOKEN = hashlib.sha256(DASHBOARD_PWD.encode()).hexdigest()[:32]
 _cache = {}
 _cache_lock = threading.Lock()
 
+# ── Last search context ──
+_last_search_context = None
+_last_search_lock = threading.Lock()
+
 def cache_get(key, max_age=5):
     with _cache_lock:
         if key in _cache:
@@ -152,6 +156,33 @@ def cache_clear(*keys):
             return
         for key in keys:
             _cache.pop(key, None)
+
+
+def set_last_search_context(query, search_type, results):
+    global _last_search_context
+    payload = {
+        "query": (query or "").strip(),
+        "type": (search_type or "kad").strip().lower(),
+        "results": list(results or []),
+        "timestamp": time.time(),
+    }
+    with _last_search_lock:
+        _last_search_context = payload
+
+
+def get_last_search_context(max_age=900):
+    with _last_search_lock:
+        ctx = _last_search_context
+        if not ctx:
+            return None
+        if time.time() - ctx.get("timestamp", 0) > max_age:
+            return None
+        return {
+            "query": ctx.get("query", ""),
+            "type": ctx.get("type", "kad"),
+            "results": list(ctx.get("results") or []),
+            "timestamp": ctx.get("timestamp", 0),
+        }
 
 
 def fetch_text_url(url, timeout=20):
@@ -352,6 +383,24 @@ def _exec_amulecmd(command, password, timeout=15):
         return f"ERROR: {e}"
 
 
+def _build_password_candidates():
+    candidates = []
+    if _password_mode == "plain" and EC_PASSWORD:
+        candidates.append((EC_PASSWORD, "plain"))
+    elif _password_mode == "hash" and EC_PASSWORD_HASH:
+        candidates.append((EC_PASSWORD_HASH, "hash"))
+    elif _password_mode == "conf_hash" and _conf_ec_hash:
+        candidates.append((_conf_ec_hash, "conf_hash"))
+    else:
+        if EC_PASSWORD:
+            candidates.append((EC_PASSWORD, "plain"))
+        if EC_PASSWORD_HASH and EC_PASSWORD_HASH != EC_PASSWORD:
+            candidates.append((EC_PASSWORD_HASH, "hash"))
+        if _conf_ec_hash and _conf_ec_hash not in (EC_PASSWORD, EC_PASSWORD_HASH):
+            candidates.append((_conf_ec_hash, "conf_hash"))
+    return [(pwd, mode) for pwd, mode in candidates if pwd]
+
+
 # ── Logging ring buffer (last 50 entries, visible in /api/debug) ──
 import collections
 _log_buffer = collections.deque(maxlen=50)
@@ -398,26 +447,9 @@ def run_amulecmd(command, timeout=15):
     """
     global _password_mode
 
-    # Build password candidates
-    if _password_mode == "plain":
-        passwords = [(EC_PASSWORD, "plain")]
-    elif _password_mode == "hash":
-        passwords = [(EC_PASSWORD_HASH, "hash")]
-    elif _password_mode == "conf_hash":
-        passwords = [(_conf_ec_hash, "conf_hash")]
-    else:
-        passwords = []
-        if EC_PASSWORD:
-            passwords.append((EC_PASSWORD, "plain"))
-        if EC_PASSWORD_HASH and EC_PASSWORD_HASH != EC_PASSWORD:
-            passwords.append((EC_PASSWORD_HASH, "hash"))
-        # Also try hash read from amule.conf
-        if _conf_ec_hash and _conf_ec_hash not in (EC_PASSWORD, EC_PASSWORD_HASH):
-            passwords.append((_conf_ec_hash, "conf_hash"))
+    passwords = _build_password_candidates()
 
     for i, (pwd, mode) in enumerate(passwords):
-        if not pwd:
-            continue
         output = _exec_amulecmd(command, pwd, timeout)
 
         if "Authentication failed" in output or "wrong password" in output.lower():
@@ -434,6 +466,159 @@ def run_amulecmd(command, timeout=15):
         return _clean_amulecmd_output(output)
 
     return "ERROR: no password configured"
+
+
+def run_amulecmd_session(commands, delays=None, timeout=40):
+    """Run multiple amulecmd commands in the same interactive session.
+
+    This is required for workflows like: search -> results -> download,
+    because `download <id>` only works with the in-session last search.
+    """
+    global _password_mode
+
+    delays = list(delays or [])
+    passwords = _build_password_candidates()
+    if not passwords:
+        return "ERROR: no password configured"
+
+    for idx, (pwd, mode) in enumerate(passwords):
+        proc = None
+        try:
+            cmd = ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", pwd]
+            _log(f"SESSION: amulecmd -h {EC_HOST} -p {EC_PORT} -P {'***'+pwd[-4:] if len(pwd)>4 else '***'} ({mode})")
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            for i, command in enumerate(commands):
+                if proc.stdin is None:
+                    raise RuntimeError("stdin fermé")
+                _log(f"  SESSION CMD: {command}")
+                proc.stdin.write(command + "\n")
+                proc.stdin.flush()
+                if i < len(delays):
+                    time.sleep(max(0, delays[i]))
+
+            if proc.stdin:
+                proc.stdin.write("quit\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+                proc.stdin = None
+
+            output, _ = proc.communicate(timeout=timeout)
+            output = output or ""
+            _log(f"  SESSION RC={proc.returncode} | output={output[:200].replace(chr(10), ' | ')}")
+
+            if "Authentication failed" in output or "wrong password" in output.lower():
+                if idx < len(passwords) - 1:
+                    _log(f"  Session auth failed with mode={mode}, trying next...")
+                    continue
+                return _clean_amulecmd_output(output)
+
+            if _password_mode is None and "Unable to connect" not in output:
+                _password_mode = mode
+                _log(f"PASSWORD MODE LOCKED: {mode}")
+
+            return _clean_amulecmd_output(output)
+        except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+                try:
+                    output, _ = proc.communicate(timeout=3)
+                except Exception:
+                    output = ""
+            else:
+                output = ""
+            _log(f"  SESSION TIMEOUT after {timeout}s")
+            return _clean_amulecmd_output(output) or "ERROR: timeout"
+        except Exception as e:
+            if proc:
+                proc.kill()
+                try:
+                    proc.communicate(timeout=3)
+                except Exception:
+                    pass
+            _log(f"  SESSION EXCEPTION: {e}")
+            if idx == len(passwords) - 1:
+                return f"ERROR: {e}"
+
+    return "ERROR: no password configured"
+
+
+def download_from_last_search(result_id):
+    ctx = get_last_search_context()
+    if not ctx:
+        return {
+            "ok": False,
+            "error": "Aucune recherche récente disponible. Relance la recherche puis réessaie.",
+        }
+
+    selected = None
+    for item in ctx.get("results", []):
+        try:
+            if int(item.get("id")) == int(result_id):
+                selected = item
+                break
+        except (TypeError, ValueError):
+            continue
+
+    if not selected:
+        return {
+            "ok": False,
+            "error": "Résultat introuvable dans la dernière recherche.",
+        }
+
+    before = parse_downloads(run_amulecmd("show dl"))
+    before_hashes = {dl.get("hash") for dl in before if dl.get("hash")}
+
+    session_output = run_amulecmd_session(
+        [
+            f"search {ctx['type']} {ctx['query']}",
+            "results",
+            f"download {result_id}",
+        ],
+        delays=[3.0, 0.7, 1.0],
+        timeout=45,
+    )
+
+    after_raw = run_amulecmd("show dl")
+    after = parse_downloads(after_raw)
+    after_hashes = {dl.get("hash") for dl in after if dl.get("hash")}
+    added_hashes = sorted(h for h in after_hashes if h and h not in before_hashes)
+
+    selected_name = (selected.get("name") or "").strip()
+    name_present_after = any((dl.get("name") or "").strip() == selected_name for dl in after)
+    count_grew = len(after) > len(before)
+
+    success_markers = [
+        "started downloading",
+        "downloading started",
+        "added to download queue",
+        "queued",
+    ]
+    output_lower = (session_output or "").lower()
+    looks_successful = any(marker in output_lower for marker in success_markers)
+
+    ok = bool(added_hashes or name_present_after or count_grew or looks_successful)
+    message = (
+        f"Téléchargement ajouté : {selected_name}" if ok else
+        f"aMule n'a pas confirmé l'ajout pour : {selected_name}"
+    )
+
+    return {
+        "ok": ok,
+        "message": message,
+        "selected": selected,
+        "output": session_output,
+        "downloads_after": len(after),
+        "new_hashes": added_hashes,
+        "queue_changed": count_grew,
+        "name_present_after": name_present_after,
+    }
 
 
 # ── Read ECPassword hash from amule.conf at startup ──
@@ -976,6 +1161,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(3)
             raw = run_amulecmd("results")
             results = parse_search_results(raw)
+            set_last_search_context(query, stype, results)
             # Record search history
             try:
                 add_search_history(query, stype, len(results))
@@ -989,8 +1175,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/download":
             num = qs.get("id", [""])[0]
-            if num: self.send_json({"ok": True, "output": run_amulecmd(f"download {num}")})
-            else: self.send_json({"error": "id requis"}, 400)
+            if num:
+                try:
+                    result = download_from_last_search(int(num))
+                except ValueError:
+                    self.send_json({"error": "id invalide"}, 400)
+                    return
+                status = 200 if result.get("ok") else 409
+                self.send_json(result, status)
+            else:
+                self.send_json({"error": "id requis"}, 400)
 
         elif path == "/api/add_ed2k":
             link = qs.get("link", [""])[0]

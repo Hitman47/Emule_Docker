@@ -852,8 +852,12 @@ function renderResults(results, raw) {
 
 async function downloadResult(id) {
   const d = await api('/api/download?id=' + id);
-  if (d && d.ok) showToast('ok', 'Téléchargement ajouté !');
-  else showToast('err', 'Erreur ajout');
+  if (d && d.ok) {
+    showToast('ok', d.message || 'Téléchargement ajouté');
+    loadDownloads();
+  } else {
+    showToast('err', d?.error || d?.message || d?.output || 'Erreur ajout');
+  }
 }
 
 // ── Favorites ──
