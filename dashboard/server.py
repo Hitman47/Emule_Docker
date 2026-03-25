@@ -709,6 +709,86 @@ def parse_downloads(raw):
     return downloads
 
 
+def estimate_eta_text(download):
+    try:
+        speed = float(download.get("speed") or 0)
+        progress = float(download.get("progress") or 0)
+    except Exception:
+        return "—"
+    if speed <= 0 or progress <= 0 or progress >= 100:
+        return "—"
+    size = str(download.get("size") or "")
+    m = re.match(r'([\d.]+)\s*([KMGT]?i?[Bb])', size, re.I)
+    if not m:
+        return "—"
+    total = float(m.group(1))
+    unit = m.group(2).upper().replace("IB", "B")
+    mult = {"B": 1/1024, "KB": 1, "MB": 1024, "GB": 1024*1024, "TB": 1024*1024*1024}
+    total_kb = total * mult.get(unit, 1)
+    remaining_kb = total_kb * (1 - progress / 100)
+    if remaining_kb <= 0:
+        return "—"
+    secs = remaining_kb / speed
+    if secs < 60:
+        return f"{round(secs)}s"
+    if secs < 3600:
+        return f"{round(secs/60)} min"
+    if secs < 86400:
+        hours = int(secs // 3600)
+        mins = int((secs % 3600) // 60)
+        return f"{hours}h {mins:02d}m"
+    days = int(secs // 86400)
+    hours = int((secs % 86400) // 3600)
+    return f"{days}j {hours}h"
+
+
+def get_download_detail(hash_value, raw=None, downloads=None):
+    hash_value = str(hash_value or "").strip()
+    if not hash_value:
+        return None
+    raw = raw if raw is not None else run_amulecmd("show dl")
+    downloads = downloads if downloads is not None else parse_downloads(raw)
+    target = None
+    for item in downloads:
+        if item.get("hash") == hash_value:
+            target = dict(item)
+            break
+    if not target:
+        return None
+
+    blocks = []
+    current = []
+    current_hash = None
+    for line in raw.splitlines():
+        stripped = line.rstrip()
+        m_entry = re.match(r'^>?\s*([0-9A-Fa-f]{32})\s+(.+)', stripped.strip())
+        if m_entry:
+            if current_hash and current:
+                blocks.append((current_hash, current[:]))
+            current_hash = m_entry.group(1)
+            current = [stripped]
+            continue
+        if current_hash:
+            if stripped.strip():
+                current.append(stripped)
+    if current_hash and current:
+        blocks.append((current_hash, current[:]))
+
+    block_lines = []
+    for block_hash, lines in blocks:
+        if block_hash == hash_value:
+            block_lines = lines
+            break
+
+    target["eta"] = estimate_eta_text(target)
+    target["raw_block"] = "\n".join(block_lines)
+    target["raw_lines"] = block_lines
+    target["is_active"] = target.get("status") in {"downloading", "getting sources", "waiting", "connecting"}
+    target["can_resume"] = target.get("status") in {"paused", "stopped"}
+    target["can_pause"] = not target["can_resume"]
+    return target
+
+
 def parse_search_results(raw):
     """Parse amulecmd 'results' output.
     
@@ -854,18 +934,27 @@ def list_files(directory):
 HISTORY_FILE = os.path.join(AMULE_HOME, "dashboard-history.json")
 MAX_SEARCH_HISTORY = 50
 MAX_FAVORITES = 200
+MAX_SAVED_SEARCHES = 40
+
+def _normalize_history_shape(data):
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("searches", [])
+    data.setdefault("favorites", [])
+    data.setdefault("saved_searches", [])
+    return data
 
 def _load_history():
     try:
         with open(HISTORY_FILE, "r") as f:
-            return json.load(f)
+            return _normalize_history_shape(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"searches": [], "favorites": []}
+        return {"searches": [], "favorites": [], "saved_searches": []}
 
 def _save_history(data):
     try:
         with open(HISTORY_FILE, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(_normalize_history_shape(data), f, indent=2, ensure_ascii=False)
         return True
     except Exception:
         return False
@@ -899,6 +988,74 @@ def remove_favorite(link):
     h["favorites"] = [f for f in h.get("favorites", []) if f.get("link") != link]
     _save_history(h)
     return before - len(h["favorites"])
+
+def get_saved_searches():
+    h = _load_history()
+    saved = h.get("saved_searches", [])
+    saved.sort(key=lambda item: (-(item.get("last_run_ts") or 0), -(item.get("created_ts") or 0)))
+    return saved
+
+
+def add_saved_search(query, search_type="kad", label=""):
+    query = str(query or "").strip()
+    search_type = str(search_type or "kad").strip().lower()
+    label = str(label or "").strip()
+    if not query:
+        return False, "Query vide"
+    if search_type not in ("kad", "global", "local"):
+        search_type = "kad"
+    h = _load_history()
+    saved = h.get("saved_searches", [])
+    normalized_key = f"{search_type}::{query.lower()}"
+    for item in saved:
+        if item.get("key") == normalized_key:
+            if label and item.get("label") != label:
+                item["label"] = label
+                _save_history(h)
+            return False, "Déjà enregistrée"
+    now_ts = int(time.time())
+    saved.insert(0, {
+        "id": hashlib.sha1(f"{normalized_key}|{now_ts}".encode()).hexdigest()[:12],
+        "key": normalized_key,
+        "query": query,
+        "type": search_type,
+        "label": label or query,
+        "created": time.strftime("%Y-%m-%d %H:%M"),
+        "created_ts": now_ts,
+        "last_run": "",
+        "last_run_ts": 0,
+        "run_count": 0,
+    })
+    h["saved_searches"] = saved[:MAX_SAVED_SEARCHES]
+    _save_history(h)
+    return True, "Recherche enregistrée"
+
+
+def remove_saved_search(search_id):
+    h = _load_history()
+    before = len(h.get("saved_searches", []))
+    h["saved_searches"] = [s for s in h.get("saved_searches", []) if s.get("id") != search_id]
+    _save_history(h)
+    return before - len(h.get("saved_searches", []))
+
+
+def touch_saved_search(query, search_type="kad"):
+    query = str(query or "").strip()
+    search_type = str(search_type or "kad").strip().lower()
+    if not query:
+        return
+    key = f"{search_type}::{query.lower()}"
+    h = _load_history()
+    changed = False
+    for item in h.get("saved_searches", []):
+        if item.get("key") == key:
+            item["last_run"] = time.strftime("%Y-%m-%d %H:%M")
+            item["last_run_ts"] = int(time.time())
+            item["run_count"] = int(item.get("run_count") or 0) + 1
+            changed = True
+            break
+    if changed:
+        _save_history(h)
 
 
 # ══════════════════════════════════════════
@@ -1438,6 +1595,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cache_set("downloads", {"downloads": data, "raw": raw})
             self.send_json({"downloads": data, "raw": raw, "count": len(data)})
 
+        elif path == "/api/download_detail":
+            hash_value = qs.get("hash", [""])[0]
+            if not hash_value:
+                self.send_json({"ok": False, "error": "hash requis"}, 400)
+                return
+            raw = run_amulecmd("show dl")
+            downloads = parse_downloads(raw)
+            detail = get_download_detail(hash_value, raw=raw, downloads=downloads)
+            if not detail:
+                self.send_json({"ok": False, "error": "transfert introuvable"}, 404)
+                return
+            self.send_json({"ok": True, "download": detail})
+
         elif path == "/api/search":
             query = qs.get("q", [""])[0]
             stype = qs.get("type", ["kad"])[0]
@@ -1450,6 +1620,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Record search history
             try:
                 add_search_history(query, stype, len(results))
+                touch_saved_search(query, stype)
             except Exception:
                 pass
             set_last_search_context(query, stype, results)
@@ -1638,6 +1809,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             h = _load_history()
             self.send_json({"searches": h.get("searches", [])})
 
+        elif path == "/api/saved_searches":
+            self.send_json({"saved_searches": get_saved_searches()})
+
         elif path == "/api/favorites":
             h = _load_history()
             self.send_json({"favorites": h.get("favorites", [])})
@@ -1775,6 +1949,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
             else:
                 self.send_json({"error": "Source non trouvée"}, 404)
+
+        elif parsed.path == "/api/saved_searches/add":
+            query = str(data.get("query") or "").strip()
+            search_type = str(data.get("type") or "kad").strip().lower()
+            label = str(data.get("label") or "").strip()
+            ok, message = add_saved_search(query, search_type, label)
+            if ok:
+                self.send_json({"ok": True, "message": message})
+            else:
+                self.send_json({"ok": False, "error": message}, 409 if query else 400)
+
+        elif parsed.path == "/api/saved_searches/remove":
+            search_id = str(data.get("id") or "").strip()
+            if not search_id:
+                self.send_json({"ok": False, "error": "id requis"}, 400)
+                return
+            removed = remove_saved_search(search_id)
+            self.send_json({"ok": bool(removed), "removed": removed}, 200 if removed else 404)
 
         elif parsed.path == "/api/favorites/add":
             name = data.get("name", "")
