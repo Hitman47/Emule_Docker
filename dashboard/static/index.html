@@ -33,7 +33,23 @@ header h1 span{font-size:.7em;color:var(--text3);font-weight:400}
   display:flex;align-items:center;gap:5px}
 .pill.on{background:rgba(34,197,94,.15);color:var(--green)}
 .pill.off{background:rgba(239,68,68,.15);color:var(--red)}
+.pill.warn{background:rgba(245,158,11,.15);color:var(--orange)}
 .pill.info{background:rgba(99,102,241,.15);color:var(--accent2)}
+
+/* ── Connection status banner ── */
+.conn-banner{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.conn-box{padding:14px 16px;border-radius:var(--radius);display:flex;align-items:center;gap:10px}
+.conn-box .conn-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.conn-box .conn-label{font-size:.82em;color:var(--text3)}
+.conn-box .conn-value{font-size:.95em;font-weight:600}
+.conn-box .conn-detail{font-size:.78em;color:var(--text3);margin-top:2px}
+.conn-box.green{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25)}
+.conn-box.green .conn-dot{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.5)}
+.conn-box.orange{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25)}
+.conn-box.orange .conn-dot{background:var(--orange);box-shadow:0 0 6px rgba(245,158,11,.5)}
+.conn-box.red{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25)}
+.conn-box.red .conn-dot{background:var(--red);box-shadow:0 0 6px rgba(239,68,68,.5)}
+@media(max-width:640px){.conn-banner{grid-template-columns:1fr}}
 
 /* ── Tabs ── */
 .tabs{display:flex;gap:2px;background:var(--bg2);border-radius:var(--radius);padding:3px;
@@ -199,6 +215,26 @@ tr:hover{background:var(--bg3)}
       <div class="card">
         <div class="label">Fichiers terminés</div>
         <div class="value" id="totalFiles">—</div>
+      </div>
+    </div>
+
+    <!-- Connection status banner -->
+    <div class="conn-banner" id="connBanner">
+      <div class="conn-box red" id="connEd2k">
+        <div class="conn-dot"></div>
+        <div>
+          <div class="conn-label">ED2K</div>
+          <div class="conn-value" id="connEd2kValue">Chargement...</div>
+          <div class="conn-detail" id="connEd2kDetail"></div>
+        </div>
+      </div>
+      <div class="conn-box red" id="connKad">
+        <div class="conn-dot"></div>
+        <div>
+          <div class="conn-label">Kad</div>
+          <div class="conn-value" id="connKadValue">Chargement...</div>
+          <div class="conn-detail" id="connKadDetail"></div>
+        </div>
       </div>
     </div>
 
@@ -518,13 +554,57 @@ async function loadStatus() {
   const d = await api('/api/status');
   if (!d) return;
 
-  // Pills
-  const ed2k = document.getElementById('pillEd2k');
-  const kad = document.getElementById('pillKad');
-  ed2k.className = 'pill ' + (d.connected_ed2k ? 'on' : 'off');
-  kad.className = 'pill ' + (d.connected_kad ? 'on' : 'off');
+  // ── ED2K pill + banner ──
+  const ed2kPill = document.getElementById('pillEd2k');
+  const ed2kBox = document.getElementById('connEd2k');
+  const ed2kVal = document.getElementById('connEd2kValue');
+  const ed2kDet = document.getElementById('connEd2kDetail');
+
+  const es = d.ed2k_status || (d.connected_ed2k ? 'connected' : 'disconnected');
+  if (es === 'high_id') {
+    ed2kPill.className = 'pill on'; ed2kPill.textContent = '● ED2K High ID';
+    ed2kBox.className = 'conn-box green';
+    ed2kVal.textContent = 'Connecté — High ID';
+    ed2kDet.textContent = d.ed2k_server ? 'Serveur : ' + d.ed2k_server : 'Ports ouverts, vitesse optimale';
+  } else if (es === 'low_id' || es === 'connected') {
+    ed2kPill.className = 'pill warn'; ed2kPill.textContent = '● ED2K Low ID';
+    ed2kBox.className = 'conn-box orange';
+    ed2kVal.textContent = 'Connecté — Low ID';
+    ed2kDet.textContent = d.ed2k_server ? 'Serveur : ' + d.ed2k_server : 'Normal derrière un VPN';
+  } else {
+    ed2kPill.className = 'pill off'; ed2kPill.textContent = '● ED2K Off';
+    ed2kBox.className = 'conn-box red';
+    ed2kVal.textContent = 'Déconnecté';
+    ed2kDet.textContent = 'Cliquez Reconnecter ou ajoutez des serveurs';
+  }
+
+  // ── Kad pill + banner ──
+  const kadPill = document.getElementById('pillKad');
+  const kadBox = document.getElementById('connKad');
+  const kadVal = document.getElementById('connKadValue');
+  const kadDet = document.getElementById('connKadDetail');
+
+  const ks = d.kad_status || (d.connected_kad ? 'connected' : 'disconnected');
+  if (ks === 'connected') {
+    kadPill.className = 'pill on'; kadPill.textContent = '● Kad OK';
+    kadBox.className = 'conn-box green';
+    kadVal.textContent = 'Connecté';
+    kadDet.textContent = 'Ports ouverts, pleine capacité';
+  } else if (ks === 'firewalled') {
+    kadPill.className = 'pill warn'; kadPill.textContent = '● Kad FW';
+    kadBox.className = 'conn-box orange';
+    kadVal.textContent = 'Connecté — Firewalled';
+    kadDet.textContent = 'Normal derrière VPN/NAT, fonctionne quand même';
+  } else {
+    kadPill.className = 'pill off'; kadPill.textContent = '● Kad Off';
+    kadBox.className = 'conn-box red';
+    kadVal.textContent = 'Déconnecté';
+    kadDet.textContent = 'Reconnexion auto toutes les 15 min';
+  }
+
+  // ── Speed pill ──
   document.getElementById('pillSpeed').textContent =
-    '↓ ' + d.download_speed.toFixed(1) + ' ↑ ' + d.upload_speed.toFixed(1) + ' KB/s';
+    '\u2193 ' + d.download_speed.toFixed(1) + ' \u2191 ' + d.upload_speed.toFixed(1) + ' KB/s';
 
   // Cards
   document.getElementById('dlSpeed').innerHTML = d.download_speed.toFixed(1) + '<span class="unit">KB/s</span>';

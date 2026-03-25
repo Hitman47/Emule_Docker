@@ -443,25 +443,89 @@ except Exception as _e:
 def parse_status(raw):
     info = {
         "connected_ed2k": False, "connected_kad": False,
+        "ed2k_status": "disconnected",   # disconnected | low_id | high_id
+        "kad_status": "disconnected",     # disconnected | firewalled | connected
+        "ed2k_server": "",
+        "ed2k_id_type": "",
         "download_speed": 0, "upload_speed": 0,
-        "queue_length": 0, "shared_files": 0, "raw": raw
+        "queue_length": 0, "shared_files": 0,
+        "clients_in_queue": 0, "total_sources": 0,
+        "raw": raw
     }
     for line in raw.split("\n"):
         ll = line.lower().strip()
-        if "ed2k" in ll and "connected" in ll and "not" not in ll:
-            info["connected_ed2k"] = True
-        if "kad" in ll and ("connected" in ll or "running" in ll) and "not" not in ll:
-            info["connected_kad"] = True
+        orig = line.strip()
+
+        # ── ED2K detection ──
+        if "ed2k" in ll or "edonkey" in ll:
+            if "not connected" in ll or "disconnected" in ll:
+                info["ed2k_status"] = "disconnected"
+                info["connected_ed2k"] = False
+            elif "connected" in ll:
+                info["connected_ed2k"] = True
+                if "high" in ll or "highid" in ll or "high id" in ll:
+                    info["ed2k_status"] = "high_id"
+                    info["ed2k_id_type"] = "High ID"
+                elif "low" in ll or "lowid" in ll or "low id" in ll:
+                    info["ed2k_status"] = "low_id"
+                    info["ed2k_id_type"] = "Low ID"
+                else:
+                    info["ed2k_status"] = "connected"
+                # Try to extract server name: "Connected to ServerName (ip:port)"
+                m = re.search(r'connected\s+to\s+(.+?)(?:\s*\(|$)', orig, re.I)
+                if m:
+                    info["ed2k_server"] = m.group(1).strip()
+
+        # ── Kad detection ──
+        if "kad" in ll:
+            if "not connected" in ll or "not running" in ll or "disconnected" in ll:
+                info["kad_status"] = "disconnected"
+                info["connected_kad"] = False
+            elif "firewalled" in ll:
+                info["kad_status"] = "firewalled"
+                info["connected_kad"] = True
+            elif "connected" in ll or "running" in ll:
+                info["kad_status"] = "connected"
+                info["connected_kad"] = True
+
+        # ── Speeds (multiple formats) ──
         m = re.search(r'dl:\s*([\d.]+)\s*kb/s.*ul:\s*([\d.]+)\s*kb/s', ll)
         if m:
             info["download_speed"] = float(m.group(1))
             info["upload_speed"] = float(m.group(2))
-        if "download" in ll and "kb/s" in ll:
-            m2 = re.search(r'([\d.]+)\s*kb/s', ll)
-            if m2: info["download_speed"] = float(m2.group(1))
-        if "upload" in ll and "kb/s" in ll:
-            m2 = re.search(r'([\d.]+)\s*kb/s', ll)
-            if m2: info["upload_speed"] = float(m2.group(1))
+
+        # "Download: X bytes/sec" format
+        if "download:" in ll:
+            m2 = re.search(r'download:\s*([\d.]+)\s*(bytes|kb|mb)', ll)
+            if m2:
+                val = float(m2.group(1))
+                unit = m2.group(2)
+                if unit == "bytes": val /= 1024
+                elif unit == "mb": val *= 1024
+                info["download_speed"] = val
+        if "upload:" in ll:
+            m2 = re.search(r'upload:\s*([\d.]+)\s*(bytes|kb|mb)', ll)
+            if m2:
+                val = float(m2.group(1))
+                unit = m2.group(2)
+                if unit == "bytes": val /= 1024
+                elif unit == "mb": val *= 1024
+                info["upload_speed"] = val
+
+        # Clients / Sources
+        if "clients in queue" in ll:
+            m3 = re.search(r'(\d+)', ll)
+            if m3: info["clients_in_queue"] = int(m3.group(1))
+        if "total sources" in ll:
+            m3 = re.search(r'(\d+)', ll)
+            if m3: info["total_sources"] = int(m3.group(1))
+
+    # If ED2K connected but no ID type detected, try to figure out from server line
+    if info["connected_ed2k"] and info["ed2k_status"] == "connected":
+        # Default to low_id if behind VPN (most likely)
+        info["ed2k_status"] = "low_id"
+        info["ed2k_id_type"] = "Low ID"
+
     return info
 
 
