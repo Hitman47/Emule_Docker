@@ -264,9 +264,11 @@ tr:hover{background:var(--bg3)}
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect')">🔌 Reconnecter</button>
+      <button class="btn btn-ghost btn-sm" onclick="connectED2K()">🔌 Reconnecter ED2K</button>
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect?target=kad')">🔌 Reconnecter Kad</button>
       <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/organize')">📂 Organiser fichiers</button>
     </div>
+    <div id="connectResult" class="msg" style="margin-top:8px"></div>
   </div>
 
   <!-- ══════════════════════════════════════════ -->
@@ -347,7 +349,7 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
         <button class="btn btn-ghost btn-sm" onclick="loadServers()">🔄 Rafraîchir la liste</button>
-        <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect')">🔌 Reconnecter ED2K</button>
+        <button class="btn btn-ghost btn-sm" onclick="connectED2K()">🔌 Reconnecter ED2K</button>
       </div>
       <div id="serverSourcesInfo" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px"></div>
       <div id="serversTable">
@@ -574,8 +576,8 @@ async function loadStatus() {
   } else {
     ed2kPill.className = 'pill off'; ed2kPill.textContent = '● ED2K Off';
     ed2kBox.className = 'conn-box red';
-    ed2kVal.textContent = 'Déconnecté';
-    ed2kDet.textContent = 'Cliquez Reconnecter ou ajoutez des serveurs';
+    ed2kVal.innerHTML = 'Déconnecté <button class="btn btn-primary btn-sm" onclick="connectED2K()" style="margin-left:8px;padding:3px 10px;font-size:.75em">Connecter</button>';
+    ed2kDet.textContent = 'Serveurs connus mais pas connecté — cliquez Connecter';
   }
 
   // ── Kad pill + banner ──
@@ -1046,6 +1048,55 @@ async function scanNow() {
   const d = await api('/api/scan_now');
   if (d && d.ok) showToast('ok', d.message || 'Scan lancé');
   else showToast('err', 'Erreur');
+}
+
+// ── Connect ED2K with detailed logging ──
+async function connectED2K() {
+  const msg = document.getElementById('connectResult');
+  if (msg) {
+    msg.className = 'msg info show';
+    msg.innerHTML = '<div class="spinner"></div> Connexion ED2K en cours (peut prendre 10-15s)...';
+  }
+  showToast('info', 'Connexion ED2K en cours...');
+
+  const d = await api('/api/connect?target=ed2k');
+  if (!d) {
+    if (msg) { msg.className = 'msg err show'; msg.textContent = 'Erreur de communication avec le dashboard'; }
+    return;
+  }
+
+  const r = d.results || {};
+  let detail = '';
+
+  // Show connect attempt result
+  if (r.connect_ed2k) detail += 'connect ed2k: ' + r.connect_ed2k + '\n';
+
+  // Show server attempts if any
+  if (r.server_attempts && r.server_attempts.length > 0) {
+    detail += '\nTentatives serveurs individuels:\n';
+    r.server_attempts.forEach(a => {
+      detail += '  ' + a.addr + ' -> ' + (a.output || '?') + '\n';
+    });
+  }
+
+  // Final status
+  const finalStatus = r.final_status || r.status_after || '';
+  if (finalStatus) detail += '\nStatut final:\n' + finalStatus;
+
+  // Determine if we connected
+  const connected = /ed2k.*connected/i.test(finalStatus) && !/not connected/i.test(finalStatus);
+
+  if (msg) {
+    msg.className = 'msg ' + (connected ? 'ok' : 'err') + ' show';
+    msg.innerHTML = (connected ? '&#9989; ED2K connecté !' : '&#10060; ED2K non connecté') +
+      '<pre style="font-size:.75em;margin-top:8px;white-space:pre-wrap;max-height:200px;overflow:auto;color:inherit;opacity:.8">' + esc(detail) + '</pre>';
+  }
+
+  if (connected) showToast('ok', 'ED2K connecté !');
+  else showToast('err', 'ED2K: connexion échouée — voir les détails');
+
+  // Refresh status
+  setTimeout(loadStatus, 2000);
 }
 
 // ── Logs ──

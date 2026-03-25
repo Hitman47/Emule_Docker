@@ -735,9 +735,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else: self.send_json({"error": "hash requis"}, 400)
 
         elif path == "/api/connect":
-            output = run_amulecmd("connect")
+            target = qs.get("target", ["all"])[0]  # all, ed2k, kad
+            results = {}
+
+            if target in ("all", "ed2k"):
+                # 1. Try generic connect
+                _log("CONNECT ED2K: sending 'connect ed2k'")
+                out1 = run_amulecmd("connect ed2k", timeout=10)
+                results["connect_ed2k"] = out1
+                _log(f"CONNECT ED2K result: {out1[:200]}")
+
+                # 2. Wait and check status
+                time.sleep(2)
+                status_raw = run_amulecmd("status", timeout=8)
+                results["status_after"] = status_raw
+
+                # 3. If still not connected, try connecting to specific servers
+                if "not connected" in status_raw.lower() or "disconnected" in status_raw.lower() or not re.search(r'ed2k.*connected', status_raw, re.I):
+                    _log("CONNECT ED2K: generic connect failed, trying specific servers...")
+                    servers_raw = run_amulecmd("show servers", timeout=8)
+                    # Parse server IPs
+                    server_addrs = re.findall(r'((?:\d{1,3}\.){3}\d{1,3}:\d{2,5})', servers_raw)
+                    results["servers_found"] = len(server_addrs)
+                    results["server_attempts"] = []
+
+                    for addr in server_addrs[:3]:  # Try first 3
+                        _log(f"CONNECT ED2K: trying server {addr}")
+                        out = run_amulecmd(f"connect {addr}", timeout=10)
+                        results["server_attempts"].append({"addr": addr, "output": out[:200]})
+                        _log(f"  result: {out[:150]}")
+                        time.sleep(1)
+
+                    # Final status check
+                    time.sleep(3)
+                    final_status = run_amulecmd("status", timeout=8)
+                    results["final_status"] = final_status
+                    _log(f"CONNECT ED2K final status: {final_status[:200]}")
+
+            if target in ("all", "kad"):
+                _log("CONNECT KAD: sending 'connect kad'")
+                out_kad = run_amulecmd("connect kad", timeout=10)
+                results["connect_kad"] = out_kad
+
             cache_clear("status", "servers")
-            self.send_json({"ok": True, "output": output})
+            self.send_json({"ok": True, "results": results})
 
         elif path == "/api/servers" or path == "/api/server_sources":
             raw = run_amulecmd("show servers")
