@@ -258,9 +258,42 @@ tr:hover{background:var(--bg3)}
       </div>
     </div>
 
+    <!-- Stats history chart -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="label">📈 Historique transferts</div>
+        <select id="statsRange" onchange="loadStatsChart()" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text2);font-size:.78em">
+          <option value="7">7 jours</option>
+          <option value="14">14 jours</option>
+          <option value="30" selected>30 jours</option>
+        </select>
+      </div>
+      <div id="statsBarChart" style="display:flex;align-items:flex-end;gap:3px;height:130px"></div>
+      <div id="statsLabels" style="display:flex;gap:3px;font-size:.6em;color:var(--text3);margin-top:4px;overflow:hidden"></div>
+      <div style="display:flex;gap:16px;margin-top:8px;font-size:.78em;color:var(--text3)">
+        <span style="color:var(--accent)">■ Téléchargement</span>
+        <span style="color:var(--green)">■ Upload</span>
+        <span id="statsTotalInfo"></span>
+      </div>
+    </div>
+
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:8px">📡 Détails connexion</div>
       <pre id="rawStatus" style="font-size:.8em;color:var(--text2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto"></pre>
+    </div>
+
+    <!-- Stats history chart -->
+    <!-- Stats history chart -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="label">📈 Historique transferts (7 jours)</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadStatsChart()" style="padding:3px 8px;font-size:.72em">🔄</button>
+      </div>
+      <div id="statsChart" style="height:140px;position:relative"></div>
+      <div style="font-size:.75em;color:var(--text3);margin-top:6px;display:flex;gap:16px">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#6366f1;display:inline-block"></span> DL: <span id="statsTotalDl">—</span></span>
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#22c55e;display:inline-block"></span> UL: <span id="statsTotalUl">—</span></span>
+      </div>
     </div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -276,8 +309,8 @@ tr:hover{background:var(--bg3)}
   <!-- ══════════════════════════════════════════ -->
   <div class="panel" id="panel-search">
     <div class="search-box">
-      <input type="text" id="searchQuery" placeholder="Rechercher sur le réseau ED2K / Kad..."
-       onkeydown="if(event.key==='Enter')doSearch()">
+      <input type="text" id="searchQuery" placeholder="Rechercher sur ED2K / Kad..."
+       onkeydown="if(event.key==='Enter')doSearch()" oninput="showSearchSuggestions(this.value)">
       <select id="searchType">
         <option value="kad">Kad</option>
         <option value="global">Tous serveurs</option>
@@ -286,12 +319,28 @@ tr:hover{background:var(--bg3)}
       <button class="btn btn-primary" onclick="doSearch()">🔍 Chercher</button>
       <span class="kbd" title="Raccourci clavier">Ctrl+K</span>
     </div>
-    <button class="btn btn-ghost btn-sm" onclick="refreshResults()" style="margin-bottom:12px">
-      🔄 Rafraîchir résultats
-    </button>
+
+    <!-- Search history suggestions -->
+    <div id="searchSuggestions" style="display:none;margin-bottom:12px">
+      <div style="font-size:.78em;color:var(--text3);margin-bottom:4px">Recherches récentes :</div>
+      <div id="suggestionsInner" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="refreshResults()">🔄 Rafraîchir résultats</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleFavorites()">⭐ Favoris <span id="favCount" class="tab-badge" style="display:none">0</span></button>
+    </div>
 
     <div id="searchMsg" class="msg info">
       <div class="spinner"></div> Recherche en cours...
+    </div>
+
+    <!-- Favorites panel (hidden by default) -->
+    <div id="favoritesPanel" style="display:none;margin-bottom:16px">
+      <div class="card">
+        <div class="label" style="margin-bottom:8px">⭐ Favoris ED2K sauvegardés</div>
+        <div id="favoritesList"><div class="empty">Aucun favori</div></div>
+      </div>
     </div>
 
     <div id="searchResults">
@@ -459,11 +508,37 @@ tr:hover{background:var(--bg3)}
       <pre id="logViewer" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:250px;overflow:auto;white-space:pre-wrap;word-break:break-all">Sélectionne un log ci-dessus</pre>
     </div>
 
+    <!-- Bookmarklet -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🔖 Bookmarklet navigateur</div>
+      <p style="color:var(--text2);font-size:.85em;margin-bottom:10px">
+        Glisse ce bouton dans ta barre de favoris. Quand tu trouves des liens ed2k sur une page web, clique dessus pour les envoyer directement au dashboard.
+      </p>
+      <div id="bookmarkletContainer" style="margin-bottom:8px">
+        <button class="btn btn-ghost btn-sm" onclick="loadBookmarklet()">Charger le bookmarklet</button>
+      </div>
+      <div id="bookmarkletCode" style="display:none;font-size:.72em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;word-break:break-all;max-height:100px;overflow:auto"></div>
+    </div>
+
     <!-- Diagnostic -->
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:10px">🔧 Diagnostic connexion</div>
       <button class="btn btn-ghost btn-sm" onclick="runDebug()" style="margin-bottom:8px">Tester la connexion EC</button>
       <pre id="debugOutput" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:200px;overflow:auto;white-space:pre-wrap">Clique sur le bouton pour tester</pre>
+    </div>
+
+    <!-- Bookmarklet -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🔖 Bookmarklet navigateur</div>
+      <p style="color:var(--text2);font-size:.85em;margin-bottom:10px">
+        Glisse ce bouton dans ta barre de favoris. Sur une page avec des liens ed2k, clique dessus pour les envoyer au dashboard.
+      </p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <a id="bookmarkletLink" href="#" class="btn btn-primary btn-sm" style="cursor:grab"
+           ondragstart="return true">📥 aMule Ajouter</a>
+        <button class="btn btn-ghost btn-sm" onclick="loadBookmarklet()">Rafraichir le lien</button>
+      </div>
+      <p style="font-size:.75em;color:var(--text3);margin-top:8px">Fonctionne sur n'importe quel site avec des liens ed2k://</p>
     </div>
   </div>
 </div>
@@ -488,7 +563,8 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'downloads') loadDownloads();
     if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
-    if (t.dataset.tab === 'settings') loadSettings();
+    if (t.dataset.tab === 'settings') { loadSettings(); loadBookmarklet(); }
+    if (t.dataset.tab === 'search') { loadSearchHistory(); loadFavoritesCount(); }
   });
 });
 
@@ -754,14 +830,19 @@ function renderResults(results, raw) {
       '</div>';
     return;
   }
+  // Store results for favorite saving
+  window._lastResults = results;
   let html = '<table><thead><tr><th>#</th><th>Nom</th><th>Taille</th><th>Sources</th><th></th></tr></thead><tbody>';
   results.forEach(r => {
     html += `<tr>
       <td>${r.id}</td>
       <td class="fname" title="${esc(r.name)}">${esc(r.name)}</td>
-      <td>${r.size || '—'}</td>
-      <td>${r.sources || '—'}</td>
-      <td><button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id})">⬇️</button></td>
+      <td>${r.size || '\u2014'}</td>
+      <td>${r.sources || '\u2014'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-primary btn-sm" onclick="downloadResult(${r.id})" title="Télécharger">⬇️</button>
+        <button class="btn btn-ghost btn-sm" onclick="saveFavorite(${r.id})" title="Favori" style="margin-left:2px">⭐</button>
+      </td>
     </tr>`;
   });
   html += '</tbody></table>';
@@ -772,6 +853,189 @@ async function downloadResult(id) {
   const d = await api('/api/download?id=' + id);
   if (d && d.ok) showToast('ok', 'Téléchargement ajouté !');
   else showToast('err', 'Erreur ajout');
+}
+
+// ── Favorites ──
+async function saveFavorite(resultId) {
+  const r = (window._lastResults || []).find(x => x.id === resultId);
+  if (!r) { showToast('err', 'Résultat introuvable'); return; }
+  // Build a pseudo ed2k link from name (real link would need hash)
+  const link = 'ed2k://|search_result|' + resultId + '|' + encodeURIComponent(r.name) + '|/';
+  const resp = await fetch('/api/favorites/add', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: r.name, link: link, size: r.size || '', sources: r.sources || 0})
+  });
+  const d = await resp.json();
+  if (d.ok && d.added) showToast('ok', 'Ajouté aux favoris');
+  else if (d.ok) showToast('info', 'Déjà dans les favoris');
+  else showToast('err', d.error || 'Erreur');
+  loadFavoritesCount();
+}
+
+function toggleFavorites() {
+  const panel = document.getElementById('favoritesPanel');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    loadFavorites();
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+async function loadFavorites() {
+  const d = await api('/api/favorites');
+  if (!d) return;
+  const favs = d.favorites || [];
+  const container = document.getElementById('favoritesList');
+  if (!favs.length) {
+    container.innerHTML = '<div class="empty" style="padding:12px">Aucun favori sauvegardé</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Nom</th><th>Taille</th><th>Sources</th><th>Ajouté</th><th></th></tr></thead><tbody>';
+  favs.forEach(f => {
+    html += `<tr>
+      <td class="fname" title="${esc(f.name)}">${esc(f.name)}</td>
+      <td>${esc(f.size) || '\u2014'}</td>
+      <td>${f.sources || '\u2014'}</td>
+      <td style="font-size:.78em;color:var(--text3)">${esc(f.added)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="removeFavoriteItem('${esc(f.link.replace(/'/g,"\\\\'"))}')" title="Supprimer">✕</button>
+      </td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function removeFavoriteItem(link) {
+  await fetch('/api/favorites/remove', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({link: link})
+  });
+  loadFavorites();
+  loadFavoritesCount();
+  showToast('ok', 'Favori supprimé');
+}
+
+async function loadFavoritesCount() {
+  const d = await api('/api/favorites');
+  if (!d) return;
+  const count = (d.favorites || []).length;
+  const badge = document.getElementById('favCount');
+  if (count > 0) {
+    badge.style.display = 'inline'; badge.textContent = count;
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+// ── Search History Suggestions ──
+let _searchHistory = [];
+
+async function loadSearchHistory() {
+  const d = await api('/api/search_history');
+  if (d) _searchHistory = d.searches || [];
+}
+
+function showSearchSuggestions(val) {
+  const box = document.getElementById('searchSuggestions');
+  const inner = document.getElementById('suggestionsInner');
+  if (!val || val.length < 1) {
+    // Show recent searches
+    if (_searchHistory.length > 0) {
+      box.style.display = 'block';
+      inner.innerHTML = _searchHistory.slice(0, 8).map(s =>
+        `<button class="btn btn-ghost btn-sm" onclick="document.getElementById('searchQuery').value='${esc(s.query.replace(/'/g, "\\\\'"))}';doSearch()" style="font-size:.78em">${esc(s.query)} <span style="color:var(--text3);font-size:.85em">(${s.results || 0})</span></button>`
+      ).join('');
+    } else {
+      box.style.display = 'none';
+    }
+    return;
+  }
+  // Filter matching
+  const matches = _searchHistory.filter(s => s.query.toLowerCase().includes(val.toLowerCase()));
+  if (matches.length > 0) {
+    box.style.display = 'block';
+    inner.innerHTML = matches.slice(0, 6).map(s =>
+      `<button class="btn btn-ghost btn-sm" onclick="document.getElementById('searchQuery').value='${esc(s.query.replace(/'/g, "\\\\'"))}';doSearch()" style="font-size:.78em">${esc(s.query)}</button>`
+    ).join('');
+  } else {
+    box.style.display = 'none';
+  }
+}
+
+// ── Stats Chart (SVG bar chart) ──
+async function loadStatsChart() {
+  const d = await api('/api/stats_history');
+  if (!d || !d.daily) return;
+  renderStatsChart(d.daily);
+}
+
+function renderStatsChart(daily) {
+  const container = document.getElementById('statsChart');
+  if (!container) return;
+
+  // Get last 7 days
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const dt = new Date(Date.now() - i * 86400000);
+    const key = dt.toISOString().split('T')[0];
+    const label = dt.toLocaleDateString('fr-FR', {weekday: 'short'});
+    const data = daily[key] || {dl_bytes: 0, ul_bytes: 0, peak_dl: 0, peak_ul: 0};
+    days.push({key, label, dl: data.dl_bytes, ul: data.ul_bytes, peak_dl: data.peak_dl, peak_ul: data.peak_ul});
+  }
+
+  const maxVal = Math.max(...days.map(d => Math.max(d.dl, d.ul)), 1);
+  const w = container.clientWidth || 600;
+  const h = 130;
+  const barW = Math.min(30, (w / 7 - 16) / 2);
+  const gap = w / 7;
+
+  function fmtBytes(b) {
+    if (b < 1024) return b + ' o';
+    if (b < 1048576) return (b/1024).toFixed(1) + ' Ko';
+    if (b < 1073741824) return (b/1048576).toFixed(1) + ' Mo';
+    return (b/1073741824).toFixed(2) + ' Go';
+  }
+
+  let svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" style="font-family:sans-serif">`;
+
+  // Grid lines
+  for (let y = 0; y < 4; y++) {
+    const yp = 10 + y * 30;
+    svg += `<line x1="0" y1="${yp}" x2="${w}" y2="${yp}" stroke="#2a2b35" stroke-width="0.5"/>`;
+  }
+
+  let totalDl = 0, totalUl = 0;
+  days.forEach((d, i) => {
+    totalDl += d.dl; totalUl += d.ul;
+    const x = i * gap + gap/2;
+    const dlH = maxVal > 0 ? (d.dl / maxVal) * 90 : 0;
+    const ulH = maxVal > 0 ? (d.ul / maxVal) * 90 : 0;
+
+    // DL bar (blue)
+    svg += `<rect x="${x - barW - 1}" y="${100 - dlH}" width="${barW}" height="${dlH}" rx="2" fill="#6366f1" opacity="0.8"><title>DL: ${fmtBytes(d.dl)}</title></rect>`;
+    // UL bar (green)
+    svg += `<rect x="${x + 1}" y="${100 - ulH}" width="${barW}" height="${ulH}" rx="2" fill="#22c55e" opacity="0.8"><title>UL: ${fmtBytes(d.ul)}</title></rect>`;
+    // Label
+    svg += `<text x="${x}" y="${120}" text-anchor="middle" font-size="10" fill="#71717a">${d.label}</text>`;
+  });
+
+  svg += '</svg>';
+  container.innerHTML = svg;
+
+  document.getElementById('statsTotalDl').textContent = fmtBytes(totalDl);
+  document.getElementById('statsTotalUl').textContent = fmtBytes(totalUl);
+}
+
+// ── Bookmarklet ──
+async function loadBookmarklet() {
+  const d = await api('/api/bookmarklet');
+  if (!d) return;
+  const link = document.getElementById('bookmarkletLink');
+  if (link && d.bookmarklet) {
+    link.href = d.bookmarklet;
+  }
 }
 
 // ── ED2K Links ──
@@ -1162,14 +1426,21 @@ async function init() {
   await loadStatus();
   await loadDownloads();
   await loadFiles();
+  loadSearchHistory();
+  loadFavoritesCount();
+  loadStatsChart();
+  loadBookmarklet();
 
-  // Auto-refresh: status always, downloads always (for badge), tab-specific data
+  // Auto-refresh: status + downloads always, stats chart every minute
   refreshInterval = setInterval(async () => {
     await loadStatus();
     await loadDownloads();
     const tab = getActiveTab();
     if (tab === 'servers') await loadServers();
   }, 5000);
+
+  // Refresh stats chart every 60s
+  setInterval(loadStatsChart, 60000);
 }
 
 init();

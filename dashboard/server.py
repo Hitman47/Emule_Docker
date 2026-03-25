@@ -713,6 +713,125 @@ def list_files(directory):
     return files
 
 
+# ══════════════════════════════════════════
+# Search History & Favorites
+# ══════════════════════════════════════════
+HISTORY_FILE = os.path.join(AMULE_HOME, "dashboard-history.json")
+MAX_SEARCH_HISTORY = 50
+MAX_FAVORITES = 200
+
+def _load_history():
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"searches": [], "favorites": []}
+
+def _save_history(data):
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+def add_search_history(query, search_type, result_count):
+    h = _load_history()
+    entry = {"query": query, "type": search_type, "results": result_count,
+             "timestamp": int(time.time()), "date": time.strftime("%Y-%m-%d %H:%M")}
+    # Remove duplicate queries
+    h["searches"] = [s for s in h.get("searches", []) if s.get("query") != query]
+    h["searches"].insert(0, entry)
+    h["searches"] = h["searches"][:MAX_SEARCH_HISTORY]
+    _save_history(h)
+
+def add_favorite(name, ed2k_link, size="", sources=0):
+    h = _load_history()
+    if "favorites" not in h:
+        h["favorites"] = []
+    # No duplicate links
+    if any(f.get("link") == ed2k_link for f in h["favorites"]):
+        return False
+    h["favorites"].insert(0, {"name": name, "link": ed2k_link, "size": size,
+                                "sources": sources, "added": time.strftime("%Y-%m-%d %H:%M")})
+    h["favorites"] = h["favorites"][:MAX_FAVORITES]
+    _save_history(h)
+    return True
+
+def remove_favorite(link):
+    h = _load_history()
+    before = len(h.get("favorites", []))
+    h["favorites"] = [f for f in h.get("favorites", []) if f.get("link") != link]
+    _save_history(h)
+    return before - len(h["favorites"])
+
+
+# ══════════════════════════════════════════
+# Stats History (daily DL/UL tracking)
+# ══════════════════════════════════════════
+STATS_FILE = os.path.join(AMULE_HOME, "dashboard-stats.json")
+
+def _load_stats():
+    try:
+        with open(STATS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"daily": {}, "snapshots": []}
+
+def _save_stats(data):
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def record_stats_snapshot(dl_speed, ul_speed):
+    """Called every status poll to accumulate daily stats."""
+    stats = _load_stats()
+    today = time.strftime("%Y-%m-%d")
+
+    if today not in stats["daily"]:
+        stats["daily"][today] = {"dl_bytes": 0, "ul_bytes": 0, "samples": 0,
+                                  "peak_dl": 0, "peak_ul": 0}
+
+    day = stats["daily"][today]
+    # Accumulate bytes (speed is KB/s, poll interval ~5s)
+    day["dl_bytes"] += int(dl_speed * 1024 * 5)
+    day["ul_bytes"] += int(ul_speed * 1024 * 5)
+    day["samples"] += 1
+    if dl_speed > day["peak_dl"]:
+        day["peak_dl"] = round(dl_speed, 1)
+    if ul_speed > day["peak_ul"]:
+        day["peak_ul"] = round(ul_speed, 1)
+
+    # Keep only last 90 days
+    cutoff = sorted(stats["daily"].keys())
+    if len(cutoff) > 90:
+        for old_day in cutoff[:-90]:
+            del stats["daily"][old_day]
+
+    _save_stats(stats)
+
+
+# ══════════════════════════════════════════
+# Bookmarklet
+# ══════════════════════════════════════════
+def get_bookmarklet_code(dashboard_url, token):
+    """Generate a bookmarklet JS that sends ed2k links to the dashboard."""
+    return (
+        f"javascript:void((function(){{"
+        f"var links=document.querySelectorAll('a[href^=\"ed2k://\"]');"
+        f"if(!links.length){{var sel=window.getSelection().toString().trim();"
+        f"if(sel.startsWith('ed2k://')){{links=[{{href:sel}}]}}}};"
+        f"if(!links.length){{alert('Aucun lien ed2k trouvé sur cette page');return}};"
+        f"var added=0;for(var i=0;i<links.length;i++){{"
+        f"var h=links[i].href||links[i];fetch('{dashboard_url}/api/add_ed2k?link='"
+        f"+encodeURIComponent(h)+'&token={token}').then(function(){{added++}})}};"
+        f"setTimeout(function(){{alert(links.length+' lien(s) ed2k envoyé(s) au dashboard')}},1500)"
+        f"}})())"
+    )
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -763,12 +882,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = parse_status(run_amulecmd("status"))
             data["disk"] = get_disk_info()
             cache_set("status", data)
+            # Record stats snapshot for daily tracking
+            try:
+                record_stats_snapshot(data.get("download_speed", 0), data.get("upload_speed", 0))
+            except Exception:
+                pass
             self.send_json(data)
 
         elif path == "/api/downloads":
             raw = run_amulecmd("show dl")
             data = parse_downloads(raw)
-            # Don't cache too aggressively during transfers
             cache_set("downloads", {"downloads": data, "raw": raw})
             self.send_json({"downloads": data, "raw": raw, "count": len(data)})
 
@@ -780,7 +903,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             run_amulecmd(f"search {stype} {query}")
             time.sleep(3)
             raw = run_amulecmd("results")
-            self.send_json({"query": query, "type": stype, "results": parse_search_results(raw), "raw": raw})
+            results = parse_search_results(raw)
+            # Record search history
+            try:
+                add_search_history(query, stype, len(results))
+            except Exception:
+                pass
+            self.send_json({"query": query, "type": stype, "results": results, "raw": raw})
 
         elif path == "/api/results":
             raw = run_amulecmd("results")
@@ -1026,6 +1155,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "Log inconnu"}, 400)
 
+        elif path == "/api/search_history":
+            h = _load_history()
+            self.send_json({"searches": h.get("searches", [])})
+
+        elif path == "/api/favorites":
+            h = _load_history()
+            self.send_json({"favorites": h.get("favorites", [])})
+
+        elif path == "/api/stats_history":
+            stats = _load_stats()
+            self.send_json({"daily": stats.get("daily", {})})
+
+        elif path == "/api/bookmarklet":
+            # Generate bookmarklet code
+            host = self.headers.get("Host", "localhost:8078")
+            scheme = "http"
+            url = f"{scheme}://{host}"
+            code = get_bookmarklet_code(url, AUTH_TOKEN)
+            self.send_json({"bookmarklet": code, "url": url})
+
         elif path == "/" or path == "/index.html":
             self.serve_file(STATIC_DIR / "index.html", "text/html")
 
@@ -1151,6 +1300,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
             else:
                 self.send_json({"error": "Source non trouvée"}, 404)
+
+        elif parsed.path == "/api/favorites/add":
+            name = data.get("name", "")
+            link = data.get("link", "")
+            if not link.startswith("ed2k://"):
+                self.send_json({"error": "Lien ed2k invalide"}, 400)
+                return
+            added = add_favorite(name, link, data.get("size", ""), data.get("sources", 0))
+            self.send_json({"ok": True, "added": added})
+
+        elif parsed.path == "/api/favorites/remove":
+            link = data.get("link", "")
+            removed = remove_favorite(link)
+            self.send_json({"ok": True, "removed": removed})
+
+        elif parsed.path == "/api/favorites/download":
+            link = data.get("link", "")
+            if link.startswith("ed2k://"):
+                output = run_amulecmd(f"add {link}")
+                self.send_json({"ok": True, "output": output})
+            else:
+                self.send_json({"error": "Lien invalide"}, 400)
+
+        elif parsed.path == "/api/search_history/clear":
+            h = _load_history()
+            h["searches"] = []
+            _save_history(h)
+            self.send_json({"ok": True})
+
         else:
             self.send_json({"error": "not found"}, 404)
 
