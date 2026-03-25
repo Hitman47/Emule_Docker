@@ -7,10 +7,11 @@ AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
 LOG_PREFIX="[SRV-UPDATE]"
 
 # Sources fiables pour server.met
-SERVER_URLS="
+# Ordre volontaire: officiel d'abord, Peerates ensuite.
+SERVER_URLS="${SERVER_URLS:-
 http://upd.emule-security.org/server.met
 http://edk.peerates.net/servers/best/server.met
-"
+}"
 
 # Sources fiables pour nodes.dat (Kad)
 NODES_URLS="

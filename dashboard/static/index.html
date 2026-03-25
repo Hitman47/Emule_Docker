@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>aMule Dashboard — ZimaBoard</title>
-<link rel="manifest" href="/manifest.json">
-<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <style>
 /* ── Reset & Base ── */
 *{margin:0;padding:0;box-sizing:border-box}
@@ -149,6 +146,7 @@ tr:hover{background:var(--bg3)}
     <div class="tab active" data-tab="dashboard">📊 Monitoring</div>
     <div class="tab" data-tab="search">🔍 Recherche</div>
     <div class="tab" data-tab="downloads">⬇️ Transferts</div>
+    <div class="tab" data-tab="servers">🌐 Serveurs</div>
     <div class="tab" data-tab="files">📁 Fichiers</div>
   </div>
 
@@ -235,7 +233,7 @@ tr:hover{background:var(--bg3)}
     <hr style="border-color:var(--border);margin:24px 0 16px">
     <h3 style="font-size:.95em;margin-bottom:10px;color:var(--text2)">📎 Ajouter un lien ED2K</h3>
     <div class="ed2k-box">
-      <input type="text" id="ed2kLink" placeholder="ed2k://|file|...">
+      <input type="text" id="ed2kLink" placeholder="ed2k://|file|... ou ed2k://|serverlist|...">
       <button class="btn btn-primary btn-sm" onclick="addEd2k()">Ajouter</button>
     </div>
     <div id="ed2kMsg" class="msg"></div>
@@ -252,6 +250,44 @@ tr:hover{background:var(--bg3)}
     </div>
     <div id="downloadsTable">
       <div class="loading"><div class="spinner"></div></div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Servers                               -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel" id="panel-servers">
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🌐 Ajouter des serveurs ED2K</div>
+      <p style="color:var(--text2);font-size:.88em;line-height:1.45;margin-bottom:12px">
+        Priorité recommandée : <strong>eMule Security</strong>, puis <strong>Peerates</strong>.
+        FlyerNet est importé en parsant sa page HTML.
+      </p>
+      <div id="serversMsg" class="msg"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-primary btn-sm" onclick="importServerSources(['official','peerates','flyernet'])">➕ Ajouter les 3 (officiel d'abord)</button>
+        <button class="btn btn-ghost btn-sm" onclick="importServerSources(['official'])">Ajouter eMule Security</button>
+        <button class="btn btn-ghost btn-sm" onclick="importServerSources(['peerates'])">Ajouter Peerates</button>
+        <button class="btn btn-ghost btn-sm" onclick="importServerSources(['flyernet'])">Ajouter FlyerNet</button>
+      </div>
+      <div class="ed2k-box" style="margin-bottom:0">
+        <input type="text" id="serverListUrl" placeholder="URL server.met personnalisée (http://.../server.met)"
+         onkeydown="if(event.key==='Enter')importCustomServerUrl()">
+        <button class="btn btn-primary btn-sm" onclick="importCustomServerUrl()">Importer</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn btn-ghost btn-sm" onclick="loadServers()">🔄 Rafraîchir la liste</button>
+        <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect')">🔌 Reconnecter ED2K</button>
+      </div>
+      <div id="serverSourcesInfo" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px"></div>
+      <div id="serversTable">
+        <div class="loading"><div class="spinner"></div></div>
+      </div>
+      <pre id="serversRaw" style="margin-top:12px;font-size:.78em;color:var(--text3);white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto"></pre>
     </div>
   </div>
 
@@ -298,6 +334,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('panel-' + t.dataset.tab).classList.add('active');
     // Load data for the tab
     if (t.dataset.tab === 'downloads') loadDownloads();
+    if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
   });
 });
@@ -471,6 +508,89 @@ async function addEd2k() {
     msg.className = 'msg err show'; msg.textContent = 'Erreur réseau';
   }
   setTimeout(() => msg.classList.remove('show'), 3000);
+}
+
+// ── Servers ──
+async function loadServers() {
+  const d = await api('/api/servers');
+  if (!d) return;
+  renderServerSourceCards(d.sources || []);
+  renderServers(d.servers || [], d.raw || '');
+}
+
+function renderServerSourceCards(sources) {
+  const container = document.getElementById('serverSourcesInfo');
+  if (!container) return;
+  if (!sources.length) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = sources.map(src => `
+    <div class="card" style="padding:12px">
+      <div class="label">${esc(src.label || src.key || '')}</div>
+      <div style="font-size:.82em;color:var(--text2);line-height:1.4">${esc(src.description || '')}</div>
+      <div style="font-size:.74em;color:var(--text3);margin-top:8px;word-break:break-all">${esc(src.url || '')}</div>
+    </div>
+  `).join('');
+}
+
+function renderServers(servers, raw) {
+  const container = document.getElementById('serversTable');
+  const rawBox = document.getElementById('serversRaw');
+  if (rawBox) rawBox.textContent = raw || '';
+  if (!servers || !servers.length) {
+    container.innerHTML = '<div class="empty">Aucun serveur parsé pour l'instant</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Nom</th><th>Adresse</th><th>Brut</th></tr></thead><tbody>';
+  servers.forEach(server => {
+    html += `<tr>
+      <td>${esc(server.name || '—')}</td>
+      <td style="white-space:nowrap">${esc(server.address || (server.ip + ':' + server.port))}</td>
+      <td style="font-size:.78em;color:var(--text3)">${esc(server.raw || '')}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function importServerSources(sources) {
+  const msg = document.getElementById('serversMsg');
+  msg.className = 'msg info show';
+  msg.innerHTML = '<div class="spinner"></div> Import des serveurs en cours...';
+  try {
+    const r = await fetch('/api/server_sources/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sources, reconnect: true})
+    });
+    const d = await r.json();
+    const successCount = (d.results || []).filter(x => x.ok).length;
+    if (d.ok) {
+      msg.className = 'msg ok show';
+      msg.textContent = `Import terminé : ${successCount} source(s) OK.`;
+      await loadServers();
+      await loadStatus();
+    } else {
+      msg.className = 'msg err show';
+      msg.textContent = (d.results || []).map(x => `${x.label || x.source}: ${x.output || 'échec'}`).join(' | ') || 'Import impossible';
+    }
+  } catch (e) {
+    msg.className = 'msg err show';
+    msg.textContent = 'Erreur réseau pendant l'import';
+  }
+  setTimeout(() => msg.classList.remove('show'), 5000);
+}
+
+async function importCustomServerUrl() {
+  const input = document.getElementById('serverListUrl');
+  const url = input.value.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    showToast('err', 'URL server.met invalide');
+    return;
+  }
+  await importServerSources([url]);
+  input.value = '';
 }
 
 // ── Files ──
