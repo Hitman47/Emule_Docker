@@ -288,8 +288,8 @@ DeadServerRetry=2
 ServerKeepAliveTimeout=0
 Reconnect=1
 Scoresystem=1
-Serverlist=0
-AddServerListFromServer=0
+Serverlist=1
+AddServerListFromServer=1
 AddServerListFromClient=0
 SafeServerConnect=1
 AutoConnectStaticOnly=0
@@ -516,6 +516,40 @@ if [ -n "${WEBUI_PWD:-}" ]; then
 fi
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
+# ═══════════════════════════════════════════
+# FORCE-FIX: Enable server list in existing configs
+# (critical for ED2K auto-connect)
+# ═══════════════════════════════════════════
+printf "━━━ Server list fix ━━━\n"
+sed -i 's/^Serverlist=0/Serverlist=1/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^AddServerListFromServer=0/AddServerListFromServer=1/' "$AMULE_CONF" 2>/dev/null
+SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)
+printf "  Serverlist=%s\n" "$SRVLIST_VAL"
+ADDSRV_VAL=$(grep '^AddServerListFromServer=' "$AMULE_CONF" | head -1 | cut -d= -f2)
+printf "  AddServerListFromServer=%s\n" "$ADDSRV_VAL"
+
+# Download server.met BEFORE amuled starts — this is critical
+printf "  Téléchargement server.met...\n"
+if curl -fsSL --retry 3 --max-time 30 -o "${AMULE_HOME}/server.met.tmp" "http://upd.emule-security.org/server.met" 2>/dev/null; then
+    if [ -s "${AMULE_HOME}/server.met.tmp" ]; then
+        mv "${AMULE_HOME}/server.met.tmp" "${AMULE_HOME}/server.met"
+        chown "${AMULE_UID}:${AMULE_GID}" "${AMULE_HOME}/server.met"
+        printf "  [✓] server.met téléchargé (%s octets)\n" "$(wc -c < "${AMULE_HOME}/server.met")"
+    else
+        rm -f "${AMULE_HOME}/server.met.tmp"
+        printf "  [!] server.met vide, ignoré\n"
+    fi
+else
+    rm -f "${AMULE_HOME}/server.met.tmp"
+    printf "  [!] Échec téléchargement server.met\n"
+fi
+
+# Also ensure Ed2kServersUrl is set
+if ! grep -q "^Ed2kServersUrl=" "$AMULE_CONF"; then
+    printf "Ed2kServersUrl=http://upd.emule-security.org/server.met\n" >> "$AMULE_CONF"
+fi
+printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
 chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_INCOMING"
 chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_TEMP"
 chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_HOME"
@@ -541,7 +575,9 @@ start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
-# Auto-connect ED2K + Kad (background)
+# Auto-connect verification (background)
+# With Serverlist=1 and server.met downloaded, amuled should auto-connect.
+# This just verifies and imports extra servers.
 (
     _try_cmd() {
         OUT=$(amulecmd -h localhost -p 4712 -P "${AMULE_GUI_PWD}" -c "$1" 2>&1)
@@ -551,59 +587,61 @@ printf "\n[AMULE] Démarrage d'aMule...\n\n"
         echo "$OUT"
     }
 
-    # Wait for amuled EC port
+    # Wait for EC port
     printf "[AUTO-CONNECT] Attente du port EC...\n"
-    for i in $(seq 1 30); do
+    for i in $(seq 1 60); do
         if nc -z localhost 4712 2>/dev/null; then
             printf "[AUTO-CONNECT] Port EC prêt (%ds)\n" "$i"
             break
         fi
         sleep 1
     done
-    sleep 3
+    sleep 5
 
-    # Import servers
-    printf "[AUTO-CONNECT] Import des serveurs...\n"
+    # Import additional server lists via amulecmd
+    printf "[AUTO-CONNECT] Import listes de serveurs supplementaires...\n"
     _try_cmd "add ed2k://|serverlist|http://upd.emule-security.org/server.met|/" >/dev/null 2>&1
     _try_cmd "add ed2k://|serverlist|http://edk.peerates.net/servers/best/server.met|/" >/dev/null 2>&1
-    sleep 2
 
-    # Connect Kad
-    _try_cmd "connect kad" >/dev/null 2>&1
-
-    # ED2K: smart retry — don't re-send connect if already connecting
-    MAX_RETRIES=10
-    RETRY=0
-    LAST_STATE="unknown"
-    while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
-        RETRY=$((RETRY + 1))
-
+    # Check status every 15s for 3 minutes
+    for attempt in $(seq 1 12); do
+        sleep 15
         STATUS=$(_try_cmd "status")
         ED2K_LINE=$(echo "$STATUS" | grep -i "ed2k\|edonkey" | head -1)
+        KAD_LINE=$(echo "$STATUS" | grep -i "kad" | head -1)
 
-        # Already connected?
-        if echo "$ED2K_LINE" | grep -qi "connected.*lowid\|connected.*highid\|connected to"; then
-            printf "[AUTO-CONNECT] ED2K connecté ! %s\n" "$(echo "$ED2K_LINE" | tr -d '>')"
+        ED2K_OK=0
+        echo "$ED2K_LINE" | grep -qi "connected to" && ED2K_OK=1
+
+        KAD_OK=0
+        echo "$KAD_LINE" | grep -qi "connected\|running\|firewalled" && KAD_OK=1
+
+        printf "[AUTO-CONNECT] [%d/12] ED2K=%s Kad=%s\n" "$attempt" \
+            "$([ $ED2K_OK -eq 1 ] && echo 'OK' || echo 'NO')" \
+            "$([ $KAD_OK -eq 1 ] && echo 'OK' || echo 'NO')"
+
+        # Both connected? Done.
+        if [ $ED2K_OK -eq 1 ] && [ $KAD_OK -eq 1 ]; then
+            printf "[AUTO-CONNECT] Tout est connecte !\n"
+            printf "[AUTO-CONNECT] %s\n" "$(echo "$ED2K_LINE" | sed 's/^[> ]*//')"
+            printf "[AUTO-CONNECT] %s\n" "$(echo "$KAD_LINE" | sed 's/^[> ]*//')"
             break
         fi
 
-        # Currently connecting? Just wait, don't send another connect
-        if echo "$ED2K_LINE" | grep -qi "now connecting\|connecting"; then
-            printf "[AUTO-CONNECT] ED2K en cours de connexion, attente... (%d/%d)\n" "$RETRY" "$MAX_RETRIES"
-            sleep 15
-            continue
+        # If ED2K still not connected after 1 minute, send explicit connect
+        if [ $ED2K_OK -eq 0 ] && [ $attempt -eq 4 ]; then
+            printf "[AUTO-CONNECT] ED2K toujours deconnecte, envoi connect...\n"
+            _try_cmd "connect ed2k" >/dev/null 2>&1
         fi
 
-        # Truly disconnected — send connect
-        printf "[AUTO-CONNECT] ED2K déconnecté, envoi connect... (%d/%d)\n" "$RETRY" "$MAX_RETRIES"
-        _try_cmd "connect ed2k" >/dev/null 2>&1
-        sleep 15
+        # If ED2K still not connected after 2 minutes, try specific server
+        if [ $ED2K_OK -eq 0 ] && [ $attempt -eq 8 ]; then
+            printf "[AUTO-CONNECT] Tentative serveur specifique...\n"
+            _try_cmd "connect 45.82.80.155:5687" >/dev/null 2>&1
+        fi
     done
 
-    if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
-        printf "[AUTO-CONNECT] ED2K: pas connecté après %d essais\n" "$MAX_RETRIES"
-    fi
-    printf "[AUTO-CONNECT] Terminé\n"
+    printf "[AUTO-CONNECT] Termine.\n"
 ) &
 
 while true; do
