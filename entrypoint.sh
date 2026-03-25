@@ -1,10 +1,6 @@
 #!/usr/bin/env sh
 set -e
 
-# ╔══════════════════════════════════════════════════════════════╗
-# ║  aMule ZimaBoard Edition — Entrypoint                       ║
-# ╚══════════════════════════════════════════════════════════════╝
-
 printf "\n"
 printf "╔══════════════════════════════════════════╗\n"
 printf "║   aMule ZimaBoard Edition                ║\n"
@@ -23,6 +19,8 @@ REMOTE_CONF=${AMULE_HOME}/remote.conf
 KAD_NODES_DAT_URL="http://upd.emule-security.org/nodes.dat"
 SERVER_MET_URL="http://upd.emule-security.org/server.met"
 IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
+CRON_FILE="/etc/cron.d/amule"
+CRON_HAS_JOBS=0
 
 # ── Performance tuning (ZimaBoard 832 optimized) ──
 MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-300}
@@ -32,27 +30,33 @@ DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-30}
 
-# ═══════════════════════════════════════════
-# Mod: Auto Restart (from original)
-# ═══════════════════════════════════════════
+reset_cron_file() {
+    cat > "$CRON_FILE" <<'CRONEOF'
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRONEOF
+}
+
+add_cron_job() {
+    schedule="$1"
+    name="$2"
+    command="$3"
+    printf "%s root %s # %s\n" "$schedule" "$command" "$name" >> "$CRON_FILE"
+    CRON_HAS_JOBS=1
+}
+
 mod_auto_restart() {
     MOD_AUTO_RESTART_ENABLED=${MOD_AUTO_RESTART_ENABLED:-"false"}
     MOD_AUTO_RESTART_CRON=${MOD_AUTO_RESTART_CRON:-"0 6 * * *"}
-    if [ "${MOD_AUTO_RESTART_ENABLED}" = "true" ]; then
+    if [ "$MOD_AUTO_RESTART_ENABLED" = "true" ]; then
         printf "[MOD] Auto-restart activé (cron: %s)\n" "$MOD_AUTO_RESTART_CRON"
-        if ! grep -q "MOD_AUTO_RESTART" "/etc/crontabs/root" 2>/dev/null; then
-            printf "%s /bin/sh -c 'echo \"[MOD] Redémarrage aMule...\" && kill \$(pidof amuled)'\n" "$MOD_AUTO_RESTART_CRON" >> /etc/crontabs/root
-        fi
-        crond -l 8 -f > /dev/stdout 2> /dev/stderr &
+        add_cron_job "$MOD_AUTO_RESTART_CRON" "MOD_AUTO_RESTART" "/bin/sh -c 'echo \"[MOD] Redémarrage aMule...\" && pkill -x amuled || true'"
     fi
 }
 
-# ═══════════════════════════════════════════
-# Mod: Fix Kad Graph (from original)
-# ═══════════════════════════════════════════
 mod_fix_kad_graph() {
     MOD_FIX_KAD_GRAPH_ENABLED=${MOD_FIX_KAD_GRAPH_ENABLED:-"false"}
-    if [ "${MOD_FIX_KAD_GRAPH_ENABLED}" = "true" ]; then
+    if [ "$MOD_FIX_KAD_GRAPH_ENABLED" = "true" ]; then
         printf "[MOD] Fix Kad graph activé\n"
         sed -i 's/amule_stats_kad.png//g' /usr/share/amule/webserver/default/amuleweb-main-kad.php 2>/dev/null || true
         sed -i 's/amule_stats_kad.png//g' /usr/share/amule/webserver/AmuleWebUI-Reloaded/amuleweb-main-kad.php 2>/dev/null || true
@@ -60,35 +64,29 @@ mod_fix_kad_graph() {
     fi
 }
 
-# ═══════════════════════════════════════════
-# Mod: Fix Kad Bootstrap (from original, enhanced)
-# ═══════════════════════════════════════════
 mod_fix_kad_bootstrap() {
     MOD_FIX_KAD_BOOTSTRAP_ENABLED=${MOD_FIX_KAD_BOOTSTRAP_ENABLED:-"true"}
-    if [ "${MOD_FIX_KAD_BOOTSTRAP_ENABLED}" = "true" ]; then
-        if [ ! -f "${AMULE_HOME}/nodes.dat" ]; then
-            printf "[MOD] Téléchargement nodes.dat...\n"
-            curl -s --retry 3 --max-time 30 -o "${AMULE_HOME}/nodes.dat" "${KAD_NODES_DAT_URL}" && \
-                printf "[MOD] nodes.dat téléchargé avec succès\n" || \
-                printf "[MOD] ERREUR: impossible de télécharger nodes.dat\n"
-            chown "${AMULE_USER}:${AMULE_GROUP}" "${AMULE_HOME}/nodes.dat" 2>/dev/null || true
-        fi
+    if [ "$MOD_FIX_KAD_BOOTSTRAP_ENABLED" = "true" ] && [ ! -f "${AMULE_HOME}/nodes.dat" ]; then
+        printf "[MOD] Téléchargement nodes.dat...\n"
+        curl -fsSL --retry 3 --max-time 30 -o "${AMULE_HOME}/nodes.dat" "$KAD_NODES_DAT_URL" \
+            && printf "[MOD] nodes.dat téléchargé avec succès\n" \
+            || printf "[MOD] ERREUR: impossible de télécharger nodes.dat\n"
+        chown "${AMULE_UID}:${AMULE_GID}" "${AMULE_HOME}/nodes.dat" 2>/dev/null || true
     fi
 }
 
-# ═══════════════════════════════════════════
-# Mod: Auto Share (from original)
-# ═══════════════════════════════════════════
 mod_auto_share() {
     MOD_AUTO_SHARE_ENABLED=${MOD_AUTO_SHARE_ENABLED:-"false"}
     MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/incoming"}
-    if [ "${MOD_AUTO_SHARE_ENABLED}" = "true" ]; then
+    if [ "$MOD_AUTO_SHARE_ENABLED" = "true" ]; then
         printf "[MOD] Auto-share activé: %s\n" "$MOD_AUTO_SHARE_DIRECTORIES"
         SHAREDDIR_CONF="${AMULE_HOME}/shareddir.dat"
         SHAREDDIR_TMP="${SHAREDDIR_CONF}.tmp"
         printf "%s\n" "${AMULE_INCOMING}" > "$SHAREDDIR_TMP"
+        OLDIFS=$IFS
         IFS=';'
         set -- $MOD_AUTO_SHARE_DIRECTORIES
+        IFS=$OLDIFS
         for raw_dir in "$@"; do
             dir=$(printf '%s' "$raw_dir" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             [ -z "$dir" ] && continue
@@ -98,140 +96,105 @@ mod_auto_share() {
         done
         sort -u "$SHAREDDIR_TMP" > "$SHAREDDIR_CONF"
         rm -f "$SHAREDDIR_TMP"
-        chown "${AMULE_USER}:${AMULE_GROUP}" "$SHAREDDIR_CONF"
+        chown "${AMULE_UID}:${AMULE_GID}" "$SHAREDDIR_CONF"
         chmod 444 "$SHAREDDIR_CONF"
     fi
 }
 
-# ═══════════════════════════════════════════
-# NEW: File Organizer (tri auto des fichiers)
-# ═══════════════════════════════════════════
 mod_file_organizer() {
     FILE_ORGANIZER_ENABLED=${FILE_ORGANIZER_ENABLED:-"false"}
     FILE_ORGANIZER_CRON=${FILE_ORGANIZER_CRON:-"*/10 * * * *"}
-    if [ "${FILE_ORGANIZER_ENABLED}" = "true" ]; then
+    if [ "$FILE_ORGANIZER_ENABLED" = "true" ]; then
         printf "[MOD] Organisateur de fichiers activé (cron: %s)\n" "$FILE_ORGANIZER_CRON"
-        if ! grep -q "file-organizer" "/etc/crontabs/root" 2>/dev/null; then
-            printf "%s /opt/scripts/file-organizer.sh >> /var/log/file-organizer.log 2>&1\n" "$FILE_ORGANIZER_CRON" >> /etc/crontabs/root
-        fi
+        add_cron_job "$FILE_ORGANIZER_CRON" "file-organizer" "/opt/scripts/file-organizer.sh >> /var/log/file-organizer.log 2>&1"
     fi
 }
 
-# ═══════════════════════════════════════════
-# NEW: Server/Nodes Auto Update
-# ═══════════════════════════════════════════
 mod_server_update() {
     SERVER_UPDATE_ENABLED=${SERVER_UPDATE_ENABLED:-"false"}
     SERVER_UPDATE_CRON=${SERVER_UPDATE_CRON:-"0 4 * * *"}
-    if [ "${SERVER_UPDATE_ENABLED}" = "true" ]; then
+    if [ "$SERVER_UPDATE_ENABLED" = "true" ]; then
         printf "[MOD] Mise à jour auto serveurs activée (cron: %s)\n" "$SERVER_UPDATE_CRON"
-        if ! grep -q "update-servers" "/etc/crontabs/root" 2>/dev/null; then
-            printf "%s /opt/scripts/update-servers.sh >> /var/log/server-update.log 2>&1\n" "$SERVER_UPDATE_CRON" >> /etc/crontabs/root
-        fi
-        # Run once at startup
+        add_cron_job "$SERVER_UPDATE_CRON" "update-servers" "/opt/scripts/update-servers.sh >> /var/log/server-update.log 2>&1"
         /opt/scripts/update-servers.sh || true
     fi
 }
 
-# ═══════════════════════════════════════════
-# NEW: Config Backup
-# ═══════════════════════════════════════════
 mod_backup() {
     BACKUP_ENABLED=${BACKUP_ENABLED:-"false"}
     BACKUP_CRON=${BACKUP_CRON:-"0 3 * * 0"}
-    if [ "${BACKUP_ENABLED}" = "true" ]; then
+    if [ "$BACKUP_ENABLED" = "true" ]; then
         printf "[MOD] Backup config activé (cron: %s)\n" "$BACKUP_CRON"
-        if ! grep -q "backup-config" "/etc/crontabs/root" 2>/dev/null; then
-            printf "%s /opt/scripts/backup-config.sh >> /var/log/backup.log 2>&1\n" "$BACKUP_CRON" >> /etc/crontabs/root
-        fi
+        add_cron_job "$BACKUP_CRON" "backup-config" "/opt/scripts/backup-config.sh >> /var/log/backup.log 2>&1"
     fi
 }
 
-# ═══════════════════════════════════════════
-# NEW: Dashboard (HTTP stdlib app)
-# ═══════════════════════════════════════════
 start_dashboard() {
     DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-"false"}
     DASHBOARD_PORT=${DASHBOARD_PORT:-8078}
-    if [ "${DASHBOARD_ENABLED}" = "true" ]; then
+    if [ "$DASHBOARD_ENABLED" = "true" ]; then
         printf "[DASHBOARD] Démarrage du dashboard sur le port %s...\n" "$DASHBOARD_PORT"
         export AMULE_HOME
-        export INCOMING_DIR="${AMULE_INCOMING}"
-        export TEMP_DIR="${AMULE_TEMP}"
+        export INCOMING_DIR="$AMULE_INCOMING"
+        export TEMP_DIR="$AMULE_TEMP"
         export AMULE_EC_HOST="127.0.0.1"
         export AMULE_EC_PORT="4712"
         export AMULE_EC_PASSWORD="${AMULE_GUI_PWD}"
-        export EC_HOST="${AMULE_EC_HOST}"
-        export EC_PORT="${AMULE_EC_PORT}"
-        export EC_PASSWORD="${AMULE_EC_PASSWORD}"
         export DASHBOARD_PORT
-        export DASHBOARD_PWD="${DASHBOARD_PWD:-${AMULE_WEBUI_PWD}}"
+        export DASHBOARD_PWD="${DASHBOARD_PWD:-${WEBUI_PWD:-admin}}"
         python3 /opt/dashboard/server.py &
         DASHBOARD_PID=$!
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
     fi
 }
 
-# ═══════════════════════════════════════════
-# User/Group Setup
-# ═══════════════════════════════════════════
 AMULE_GROUP="amule"
-if grep -q ":${AMULE_GID}:" /etc/group; then
-    AMULE_GROUP=$(getent group "${AMULE_GID}" | cut -d: -f1)
+if getent group "$AMULE_GID" >/dev/null 2>&1; then
+    AMULE_GROUP=$(getent group "$AMULE_GID" | cut -d: -f1)
 else
-    addgroup "${AMULE_GROUP}" -g "${AMULE_GID}"
+    groupadd -o -g "$AMULE_GID" "$AMULE_GROUP"
 fi
 
 AMULE_USER="amule"
-if grep -q ":${AMULE_UID}:" /etc/passwd; then
-    AMULE_USER=$(getent passwd "${AMULE_UID}" | cut -d: -f1)
+if getent passwd "$AMULE_UID" >/dev/null 2>&1; then
+    AMULE_USER=$(getent passwd "$AMULE_UID" | cut -d: -f1)
 else
-    adduser "${AMULE_USER}" -u "${AMULE_UID}" -G "${AMULE_GROUP}" \
-        -s "/sbin/nologin" -h "/home/amule" -H -D \
-        -g "aMule User"
+    useradd -o -u "$AMULE_UID" -g "$AMULE_GROUP" -d /home/amule -M -N -s /usr/sbin/nologin "$AMULE_USER"
 fi
 
-# ═══════════════════════════════════════════
-# Create directories
-# ═══════════════════════════════════════════
-for dir in "${AMULE_INCOMING}" "${AMULE_TEMP}" "${AMULE_HOME}" "/backups"; do
+mkdir -p /home/amule
+
+for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups"; do
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
-# Create organized subdirectories
-if [ "${FILE_ORGANIZER_ENABLED}" = "true" ]; then
+if [ "${FILE_ORGANIZER_ENABLED:-false}" = "true" ]; then
     for subdir in Video Audio Images Documents Archives Software Other; do
         mkdir -p "${AMULE_INCOMING}/${subdir}"
     done
 fi
 
-# ═══════════════════════════════════════════
-# Password generation
-# ═══════════════════════════════════════════
-if [ -z "${GUI_PWD}" ]; then
+if [ -z "${GUI_PWD:-}" ]; then
     AMULE_GUI_PWD=$(pwgen -s 14)
 else
-    AMULE_GUI_PWD="${GUI_PWD}"
+    AMULE_GUI_PWD="$GUI_PWD"
 fi
-AMULE_GUI_ENCODED_PWD=$(printf "%s" "${AMULE_GUI_PWD}" | md5sum | cut -d ' ' -f 1)
+AMULE_GUI_ENCODED_PWD=$(printf "%s" "$AMULE_GUI_PWD" | md5sum | cut -d ' ' -f 1)
 
-if [ -z "${WEBUI_PWD}" ]; then
+if [ -z "${WEBUI_PWD:-}" ]; then
     AMULE_WEBUI_PWD=$(pwgen -s 14)
 else
-    AMULE_WEBUI_PWD="${WEBUI_PWD}"
+    AMULE_WEBUI_PWD="$WEBUI_PWD"
 fi
-AMULE_WEBUI_ENCODED_PWD=$(printf "%s" "${AMULE_WEBUI_PWD}" | md5sum | cut -d ' ' -f 1)
+AMULE_WEBUI_ENCODED_PWD=$(printf "%s" "$AMULE_WEBUI_PWD" | md5sum | cut -d ' ' -f 1)
 
-# ═══════════════════════════════════════════
-# Generate amule.conf if missing
-# ═══════════════════════════════════════════
-if [ ! -f "${AMULE_CONF}" ]; then
+if [ ! -f "$AMULE_CONF" ]; then
     printf "━━━ Mots de passe générés ━━━\n"
-    printf "  GUI:    %s\n" "${AMULE_GUI_PWD}"
-    printf "  WebUI:  %s\n" "${AMULE_WEBUI_PWD}"
+    printf "  GUI:    %s\n" "$AMULE_GUI_PWD"
+    printf "  WebUI:  %s\n" "$AMULE_WEBUI_PWD"
     printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
-    cat > "${AMULE_CONF}" << CONFEOF
+    cat > "$AMULE_CONF" << CONFEOF
 [eMule]
 AppVersion=2.3.3
 Nick=aMule-ZimaBoard
@@ -404,11 +367,8 @@ else
     printf "[CONFIG] amule.conf existant, utilisation de la config actuelle\n"
 fi
 
-# ═══════════════════════════════════════════
-# Generate remote.conf if missing
-# ═══════════════════════════════════════════
-if [ ! -f "${REMOTE_CONF}" ]; then
-    cat > "${REMOTE_CONF}" << REMEOF
+if [ ! -f "$REMOTE_CONF" ]; then
+    cat > "$REMOTE_CONF" << REMEOF
 Locale=
 [EC]
 Host=localhost
@@ -429,27 +389,21 @@ else
     printf "[CONFIG] remote.conf existant\n"
 fi
 
-# Replace passwords if set via env
-if [ -n "${GUI_PWD}" ]; then
-    sed -i "s/^ECPassword=.*/ECPassword=${AMULE_GUI_ENCODED_PWD}/" "${AMULE_CONF}"
-    sed -i "s/^Password=.*/Password=${AMULE_GUI_ENCODED_PWD}/" "${REMOTE_CONF}"
+if [ -n "${GUI_PWD:-}" ]; then
+    sed -i "s/^ECPassword=.*/ECPassword=${AMULE_GUI_ENCODED_PWD}/" "$AMULE_CONF"
+    sed -i "s/^Password=.*/Password=${AMULE_GUI_ENCODED_PWD}/" "$REMOTE_CONF"
 fi
-if [ -n "${WEBUI_PWD}" ]; then
-    sed -i "s|^\(Password=\).*|\1${AMULE_WEBUI_ENCODED_PWD}|" "${AMULE_CONF}"
-    sed -i "s|^\(AdminPassword=\).*|\1${AMULE_WEBUI_ENCODED_PWD}|" "${REMOTE_CONF}"
+if [ -n "${WEBUI_PWD:-}" ]; then
+    sed -i "s|^Password=.*|Password=${AMULE_WEBUI_ENCODED_PWD}|" "$AMULE_CONF"
+    sed -i "s|^AdminPassword=.*|AdminPassword=${AMULE_WEBUI_ENCODED_PWD}|" "$REMOTE_CONF"
 fi
 
-# ═══════════════════════════════════════════
-# Set permissions
-# ═══════════════════════════════════════════
-chown -R "${AMULE_UID}:${AMULE_GID}" "${AMULE_INCOMING}"
-chown -R "${AMULE_UID}:${AMULE_GID}" "${AMULE_TEMP}"
-chown -R "${AMULE_UID}:${AMULE_GID}" "${AMULE_HOME}"
+chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_INCOMING"
+chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_TEMP"
+chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_HOME"
 chown -R "${AMULE_UID}:${AMULE_GID}" "/backups" 2>/dev/null || true
 
-# ═══════════════════════════════════════════
-# Start all mods
-# ═══════════════════════════════════════════
+reset_cron_file
 mod_auto_restart
 mod_fix_kad_graph
 mod_fix_kad_bootstrap
@@ -457,24 +411,20 @@ mod_file_organizer
 mod_server_update
 mod_backup
 
-# Start cron daemon if any cron jobs were added
-if [ -s "/etc/crontabs/root" ]; then
-    crond -l 8 -f > /dev/stdout 2> /dev/stderr &
+if [ "$CRON_HAS_JOBS" -eq 1 ]; then
+    chmod 0644 "$CRON_FILE"
+    cron
 fi
 
-# Start dashboard
 start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
-# ═══════════════════════════════════════════
-# Start aMule (with auto-restart loop)
-# ═══════════════════════════════════════════
 while true; do
     mod_auto_share
-    su "${AMULE_USER}" -s "/bin/sh" -c "amuled -c ${AMULE_HOME} -o"
+    gosu "${AMULE_UID}:${AMULE_GID}" amuled -c "${AMULE_HOME}" -o
     EXIT_CODE=$?
-    if [ $EXIT_CODE -eq 0 ]; then
+    if [ "$EXIT_CODE" -eq 0 ]; then
         printf "[MOD] Redémarrage d'aMule...\n"
     else
         printf "[AMULE] Arrêt avec code: %d\n" "$EXIT_CODE"
