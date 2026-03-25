@@ -495,6 +495,16 @@ tr:hover{background:var(--bg3)}
       </div>
     </div>
 
+    <!-- Recent action history -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
+        <div class="label">🧾 Historique des actions</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadActionHistory()">🔄 Rafraîchir</button>
+      </div>
+      <div id="actionHistorySummary" style="font-size:.78em;color:var(--text3);margin-bottom:8px">Chargement...</div>
+      <div id="actionHistoryList"><div class="empty">Chargement...</div></div>
+    </div>
+
     <!-- Logs viewer -->
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:10px">📋 Logs</div>
@@ -523,9 +533,12 @@ tr:hover{background:var(--bg3)}
 
     <!-- Diagnostic -->
     <div class="card" style="margin-bottom:12px">
-      <div class="label" style="margin-bottom:10px">🔧 Diagnostic connexion</div>
-      <button class="btn btn-ghost btn-sm" onclick="runDebug()" style="margin-bottom:8px">Tester la connexion EC</button>
-      <pre id="debugOutput" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:200px;overflow:auto;white-space:pre-wrap">Clique sur le bouton pour tester</pre>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap">
+        <div class="label">🔧 Diagnostic connexion</div>
+        <button class="btn btn-ghost btn-sm" onclick="runDebug()">Tester la connexion EC</button>
+      </div>
+      <div id="debugSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:10px"></div>
+      <pre id="debugOutput" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap">Clique sur le bouton pour tester</pre>
     </div>
 
     <!-- Bookmarklet -->
@@ -564,7 +577,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'downloads') loadDownloads();
     if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
-    if (t.dataset.tab === 'settings') { loadSettings(); loadBookmarklet(); }
+    if (t.dataset.tab === 'settings') { loadSettings(); loadBookmarklet(); loadActionHistory(); runDebug(); }
     if (t.dataset.tab === 'search') { loadSearchHistory(); loadFavoritesCount(); }
   });
 });
@@ -608,6 +621,10 @@ async function apiCall(path, opts = {}) {
     if (typeof successRefresh === 'function') await successRefresh();
   } else {
     showToast('err', getActionMessage(d, 'Erreur inconnue'));
+  }
+  if (getActiveTab() === 'settings') {
+    loadActionHistory();
+    runDebug();
   }
   return d;
 }
@@ -1465,16 +1482,61 @@ async function showLog(name) {
   }
 }
 
+// ── Action history ──
+async function loadActionHistory() {
+  const listEl = document.getElementById('actionHistoryList');
+  const summaryEl = document.getElementById('actionHistorySummary');
+  if (!listEl || !summaryEl) return;
+  summaryEl.textContent = 'Chargement...';
+  const d = await api('/api/action_history?limit=20');
+  const actions = d?.actions || [];
+  if (!actions.length) {
+    summaryEl.textContent = 'Aucune action récente';
+    listEl.innerHTML = '<div class="empty">Aucune action récente</div>';
+    return;
+  }
+  const okCount = actions.filter(a => a.ok).length;
+  const confirmedCount = actions.filter(a => a.confirmed).length;
+  summaryEl.textContent = `${actions.length} action(s) récentes · ${okCount} OK · ${confirmedCount} confirmées`;
+  listEl.innerHTML = '<div style="display:grid;gap:6px">' + actions.map(a => {
+    const color = a.ok ? (a.confirmed ? 'var(--green)' : 'var(--orange)') : 'var(--red)';
+    const status = a.ok ? (a.confirmed ? 'confirmé' : 'envoyé') : 'échec';
+    return `<div style="padding:9px 10px;background:var(--bg3);border:1px solid var(--border);border-left:4px solid ${color};border-radius:8px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="font-size:.86em;font-weight:600">${esc(a.action || 'action')} · ${esc(status)}</div>
+        <div style="font-size:.72em;color:var(--text3)">${esc(a.timestamp || '')}</div>
+      </div>
+      <div style="font-size:.78em;color:var(--text2);margin-top:4px">${esc(a.message || '')}</div>
+      ${a.target ? `<div style="font-size:.72em;color:var(--text3);margin-top:4px;word-break:break-all">Cible: ${esc(a.target)}</div>` : ''}
+      <div style="font-size:.7em;color:var(--text3);margin-top:3px">${esc(a.code || '')} · HTTP ${esc(String(a.http_status || ''))}</div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
 // ── Debug ──
 async function runDebug() {
-  const el = document.getElementById('debugOutput');
-  el.textContent = 'Test en cours...';
+  const summary = document.getElementById('debugSummary');
+  const raw = document.getElementById('debugOutput');
+  if (raw) raw.textContent = 'Test en cours...';
+  if (summary) summary.innerHTML = '';
   const d = await api('/api/debug');
-  if (d) {
-    el.textContent = JSON.stringify(d, null, 2);
-  } else {
-    el.textContent = 'Erreur de connexion au dashboard';
+  if (!d) {
+    if (raw) raw.textContent = 'Erreur de connexion au dashboard';
+    return;
   }
+  if (summary) {
+    const status = d.status || {};
+    const cards = [
+      ['Core EC', d.port_4712_open ? 'Accessible' : 'Fermé'],
+      ['amuled', d.amuled_running ? 'Actif' : 'Arrêté'],
+      ['ED2K', status.connected_ed2k ? (status.ed2k_id_type || 'Connecté') : 'Déconnecté'],
+      ['Kad', status.connected_kad ? (status.kad_status || 'Connecté') : 'Déconnecté'],
+      ['Transferts', String(d.downloads_count ?? '—')],
+      ['Dernière recherche', d.last_search?.query ? `${d.last_search.query} (${d.last_search.results_count || 0})` : 'Aucune'],
+    ];
+    summary.innerHTML = cards.map(([label, value]) => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px"><div style="font-size:.72em;color:var(--text3);margin-bottom:4px">${esc(label)}</div><div style="font-size:.9em;font-weight:600;word-break:break-word">${esc(value)}</div></div>`).join('');
+  }
+  if (raw) raw.textContent = JSON.stringify(d, null, 2);
 }
 
 // ── Init & Auto-refresh ──

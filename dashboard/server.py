@@ -158,6 +158,11 @@ def cache_clear(*keys):
 _action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel")}
 _last_search_context = {"query": "", "type": "kad", "results": [], "timestamp": 0}
 
+# Recent action history for UI / diagnostics
+import collections
+_action_history = collections.deque(maxlen=80)
+_action_history_lock = threading.Lock()
+
 
 def set_last_search_context(query, search_type, results):
     global _last_search_context
@@ -179,6 +184,38 @@ def action_response(action, ok, code, message, confirmed=False, status=None, dat
         "data": data or {},
     }
     return payload, (status or (200 if ok else 409))
+
+
+def record_action_event(payload, http_status):
+    event = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": int(time.time()),
+        "action": payload.get("action", "unknown"),
+        "ok": bool(payload.get("ok")),
+        "confirmed": bool(payload.get("confirmed")),
+        "code": payload.get("code", "UNKNOWN"),
+        "message": payload.get("message", ""),
+        "http_status": int(http_status or 0),
+    }
+    data = payload.get("data") or {}
+    if isinstance(data, dict):
+        if data.get("download", {}).get("name"):
+            event["target"] = data["download"]["name"]
+        elif data.get("existing", {}).get("name"):
+            event["target"] = data["existing"]["name"]
+        elif data.get("link"):
+            event["target"] = str(data["link"])[:140]
+        elif data.get("hash"):
+            event["target"] = data["hash"]
+        elif data.get("query"):
+            event["target"] = data["query"]
+    with _action_history_lock:
+        _action_history.appendleft(event)
+
+
+def get_action_history(limit=30):
+    with _action_history_lock:
+        return list(_action_history)[:max(1, int(limit))]
 
 
 def fetch_text_url(url, timeout=20):
@@ -380,7 +417,6 @@ def _exec_amulecmd(command, password, timeout=15):
 
 
 # ── Logging ring buffer (last 50 entries, visible in /api/debug) ──
-import collections
 _log_buffer = collections.deque(maxlen=50)
 
 def _log(msg):
@@ -1073,6 +1109,8 @@ def download_from_cached_search(result_id):
     ctx = _last_search_context.copy()
     if not ctx.get("query"):
         return action_response("download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
+    if ctx.get("timestamp") and time.time() - ctx.get("timestamp", 0) > 15 * 60:
+        return action_response("download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
     matched = next((r for r in ctx.get("results", []) if int(r.get("id", -1)) == int(result_id)), None)
     if not matched:
         return action_response("download", False, "RESULT_NOT_FOUND", normalize_action_error("download", "RESULT_NOT_FOUND"), status=404)
@@ -1094,24 +1132,47 @@ def download_from_cached_search(result_id):
 
 
 def add_ed2k_confirmed(link):
-    parsed = parse_ed2k_link(link)
-    if not parsed:
+    link = (link or "").strip()
+    if not link.startswith("ed2k://"):
         return action_response("add_ed2k", False, "INVALID_INPUT", normalize_action_error("add_ed2k", "INVALID_INPUT"), status=400)
-    current_downloads = parse_downloads(run_amulecmd("show dl"))
-    existing = check_duplicate_downloads(name=parsed["name"], hash_value=parsed["hash"], size_bytes=parsed["size"], downloads=current_downloads)
-    if existing:
-        return action_response("add_ed2k", False, "ALREADY_EXISTS", normalize_action_error("add_ed2k", "ALREADY_EXISTS"), confirmed=True, data={"existing": existing}, status=409)
-    output = run_amulecmd(f"add {link}", timeout=20)
-    err = classify_amule_error(output)
-    if err:
-        return action_response("add_ed2k", False, err, normalize_action_error("add_ed2k", err, output), status=502)
-    time.sleep(0.6)
-    refreshed = parse_downloads(run_amulecmd("show dl"))
-    created = check_duplicate_downloads(name=parsed["name"], hash_value=parsed["hash"], size_bytes=parsed["size"], downloads=refreshed)
-    if created:
-        cache_clear("downloads", "servers")
-        return action_response("add_ed2k", True, "SUCCESS", "Lien ED2K confirmé dans les transferts.", confirmed=True, data={"download": created})
-    return action_response("add_ed2k", False, "STATE_NOT_CONFIRMED", normalize_action_error("add_ed2k", "STATE_NOT_CONFIRMED"), status=502, data={"output": output})
+
+    # Standard ed2k file link: fully confirm in downloads.
+    parsed = parse_ed2k_link(link)
+    if parsed:
+        current_downloads = parse_downloads(run_amulecmd("show dl"))
+        existing = check_duplicate_downloads(name=parsed["name"], hash_value=parsed["hash"], size_bytes=parsed["size"], downloads=current_downloads)
+        if existing:
+            return action_response("add_ed2k", False, "ALREADY_EXISTS", normalize_action_error("add_ed2k", "ALREADY_EXISTS"), confirmed=True, data={"existing": existing, "link": link}, status=409)
+        output = run_amulecmd(f"add {link}", timeout=20)
+        err = classify_amule_error(output)
+        if err:
+            return action_response("add_ed2k", False, err, normalize_action_error("add_ed2k", err, output), status=502, data={"link": link})
+        time.sleep(0.6)
+        refreshed = parse_downloads(run_amulecmd("show dl"))
+        created = check_duplicate_downloads(name=parsed["name"], hash_value=parsed["hash"], size_bytes=parsed["size"], downloads=refreshed)
+        if created:
+            cache_clear("downloads", "servers")
+            return action_response("add_ed2k", True, "SUCCESS", "Lien ED2K confirmé dans les transferts.", confirmed=True, data={"download": created, "link": link})
+        return action_response("add_ed2k", False, "STATE_NOT_CONFIRMED", normalize_action_error("add_ed2k", "STATE_NOT_CONFIRMED"), status=502, data={"output": output, "link": link})
+
+    # Server list link: best-effort confirmation through server list growth.
+    if link.startswith("ed2k://|serverlist|"):
+        before_raw = run_amulecmd("show servers", timeout=10)
+        before_servers = parse_servers(before_raw)
+        output = run_amulecmd(f"add {link}", timeout=20)
+        err = classify_amule_error(output)
+        if err:
+            return action_response("add_ed2k", False, err, normalize_action_error("add_ed2k", err, output), status=502, data={"link": link})
+        time.sleep(1.2)
+        after_raw = run_amulecmd("show servers", timeout=10)
+        after_servers = parse_servers(after_raw)
+        cache_clear("servers")
+        added = max(0, len(after_servers) - len(before_servers))
+        confirmed = added > 0
+        msg = "Liste de serveurs importée et confirmée." if confirmed else "Liste de serveurs envoyée à aMule. Vérifie l'onglet Serveurs."
+        return action_response("add_ed2k", True, "SUCCESS", msg, confirmed=confirmed, data={"before_count": len(before_servers), "after_count": len(after_servers), "link": link})
+
+    return action_response("add_ed2k", False, "INVALID_INPUT", normalize_action_error("add_ed2k", "INVALID_INPUT"), status=400)
 
 
 def change_transfer_state(action, hash_value=None):
@@ -1119,39 +1180,117 @@ def change_transfer_state(action, hash_value=None):
     downloads = parse_downloads(run_amulecmd("show dl"))
     if hash_value and not any(d.get("hash") == hash_value for d in downloads):
         return action_response(action, False, "TRANSFER_NOT_FOUND", normalize_action_error(action, "TRANSFER_NOT_FOUND"), status=404)
+
     command = {"pause": "pause", "resume": "resume", "cancel": "cancel"}[action]
     output = run_amulecmd(f"{command} {hash_value}" if hash_value else command, timeout=20)
     err = classify_amule_error(output)
     if err:
-        return action_response(action, False, err, normalize_action_error(action, err, output), status=502)
-    time.sleep(0.5)
+        return action_response(action, False, err, normalize_action_error(action, err, output), status=502, data={"hash": hash_value} if hash_value else {})
+
+    time.sleep(0.6)
     refreshed = parse_downloads(run_amulecmd("show dl"))
+
     if action == "cancel":
         if hash_value and any(d.get("hash") == hash_value for d in refreshed):
-            return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502)
+            return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502, data={"hash": hash_value})
         cache_clear("downloads")
-        return action_response(action, True, "SUCCESS", "Suppression confirmée.", confirmed=True)
+        return action_response(action, True, "SUCCESS", "Suppression confirmée.", confirmed=True, data={"hash": hash_value} if hash_value else {})
+
+    target_states = {"pause": {"paused", "stopped"}, "resume": {"downloading", "waiting", "getting sources", "connecting", "queued"}}[action]
+
     if hash_value:
         after = next((d for d in refreshed if d.get("hash") == hash_value), None)
         if not after:
-            return action_response(action, False, "TRANSFER_NOT_FOUND", normalize_action_error(action, "TRANSFER_NOT_FOUND"), status=404)
-        target_states = {"pause": {"paused", "stopped"}, "resume": {"downloading", "waiting", "getting sources", "connecting", "queued"}}[action]
+            return action_response(action, False, "TRANSFER_NOT_FOUND", normalize_action_error(action, "TRANSFER_NOT_FOUND"), status=404, data={"hash": hash_value})
         if after.get("status") in target_states:
             cache_clear("downloads")
-            return action_response(action, True, "SUCCESS", "Pause confirmée." if action == "pause" else "Reprise confirmée.", confirmed=True, data={"download": after})
-        return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502, data={"download": after})
+            return action_response(action, True, "SUCCESS", "Pause confirmée." if action == "pause" else "Reprise confirmée.", confirmed=True, data={"download": after, "hash": hash_value})
+        return action_response(action, False, "STATE_NOT_CONFIRMED", normalize_action_error(action, "STATE_NOT_CONFIRMED"), status=502, data={"download": after, "hash": hash_value})
+
+    # Bulk action best-effort confirmation
+    before_paused = sum(1 for d in downloads if d.get("status") in {"paused", "stopped"})
+    before_active = sum(1 for d in downloads if d.get("status") not in {"paused", "stopped"})
+    after_paused = sum(1 for d in refreshed if d.get("status") in {"paused", "stopped"})
+    after_active = sum(1 for d in refreshed if d.get("status") not in {"paused", "stopped"})
+    confirmed = False
+    if action == "pause":
+        confirmed = after_active < before_active or (before_active > 0 and after_active == 0)
+        message = "Pause globale confirmée." if confirmed else "Commande de pause envoyée. Vérifie les transferts."
+    else:
+        confirmed = after_paused < before_paused or before_paused == 0
+        message = "Reprise globale confirmée." if confirmed else "Commande de reprise envoyée. Vérifie les transferts."
     cache_clear("downloads")
-    return action_response(action, True, "SUCCESS", "Commande envoyée.", confirmed=False)
+    return action_response(action, True, "SUCCESS", message, confirmed=confirmed, data={"before_active": before_active, "after_active": after_active, "before_paused": before_paused, "after_paused": after_paused})
 
 
 def execute_locked_action(action, fn):
     lock = acquire_action_lock(action)
     if not lock:
-        return action_response(action, False, "LOCKED", normalize_action_error(action, "LOCKED"), status=409)
+        payload, status = action_response(action, False, "LOCKED", normalize_action_error(action, "LOCKED"), status=409)
+        record_action_event(payload, status)
+        return payload, status
     try:
-        return fn()
+        payload, status = fn()
+        record_action_event(payload, status)
+        return payload, status
     finally:
         lock.release()
+
+
+def build_debug_snapshot():
+    diag = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+    try:
+        ps = subprocess.run(["pgrep", "-x", "amuled"], capture_output=True, text=True, timeout=5)
+        diag["amuled_running"] = ps.returncode == 0
+        diag["amuled_pid"] = ps.stdout.strip() or None
+    except Exception as e:
+        diag["amuled_running"] = False
+        diag["amuled_pid_error"] = str(e)
+
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        result_conn = s.connect_ex(("localhost", int(EC_PORT)))
+        s.close()
+        diag["port_4712_open"] = result_conn == 0
+        diag["port_4712_errno"] = result_conn
+    except Exception as e:
+        diag["port_4712_open"] = False
+        diag["port_4712_error"] = str(e)
+
+    diag["ec_host"] = EC_HOST
+    diag["ec_port"] = EC_PORT
+    diag["password_mode_detected"] = _password_mode or "not yet"
+    diag["cred_file"] = _cred_file
+    diag["cred_file_exists"] = os.path.isfile(_cred_file)
+
+    status_raw = run_amulecmd("status", timeout=8)
+    status_info = parse_status(status_raw)
+    diag["status"] = status_info
+    diag["status_raw"] = status_raw[:800]
+
+    downloads_raw = run_amulecmd("show dl", timeout=8)
+    downloads = parse_downloads(downloads_raw)
+    counts = {}
+    for dl in downloads:
+        key = dl.get("status") or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    diag["downloads_count"] = len(downloads)
+    diag["download_status_counts"] = counts
+
+    diag["action_locks"] = {name: lock.locked() for name, lock in _action_locks.items()}
+    search_age = int(time.time() - (_last_search_context.get("timestamp") or 0)) if _last_search_context.get("timestamp") else None
+    diag["last_search"] = {
+        "query": _last_search_context.get("query", ""),
+        "type": _last_search_context.get("type", ""),
+        "results_count": len(_last_search_context.get("results") or []),
+        "age_seconds": search_age,
+    }
+    diag["recent_actions"] = get_action_history(12)
+    diag["recent_logs"] = list(_log_buffer)[-15:]
+    return diag
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1226,12 +1365,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(3)
             raw = run_amulecmd("results")
             results = parse_search_results(raw)
-            set_last_search_context(query, stype, results)
             # Record search history
             try:
                 add_search_history(query, stype, len(results))
             except Exception:
                 pass
+            set_last_search_context(query, stype, results)
+            record_action_event({
+                "action": "search",
+                "ok": True,
+                "confirmed": True,
+                "code": "SUCCESS",
+                "message": f"Recherche terminée: {len(results)} résultat(s).",
+                "data": {"query": query},
+            }, 200)
             self.send_json({"query": query, "type": stype, "results": results, "raw": raw})
 
         elif path == "/api/results":
@@ -1345,90 +1492,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/stats":
             self.send_json({"raw": run_amulecmd("statistics")})
 
+        elif path == "/api/action_history":
+            limit = int(qs.get("limit", ["30"])[0] or "30")
+            self.send_json({"actions": get_action_history(limit)})
+
         elif path == "/api/debug":
-            diag = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
-
-            # 1. Is amuled running?
-            try:
-                ps = subprocess.run(["pgrep", "-x", "amuled"], capture_output=True, text=True, timeout=5)
-                diag["amuled_running"] = ps.returncode == 0
-                diag["amuled_pid"] = ps.stdout.strip() or None
-            except Exception as e:
-                diag["amuled_running"] = f"check failed: {e}"
-
-            # 2. Is port 4712 listening?
-            try:
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(3)
-                result_conn = s.connect_ex(("localhost", int(EC_PORT)))
-                s.close()
-                diag["port_4712_open"] = result_conn == 0
-                diag["port_4712_errno"] = result_conn
-            except Exception as e:
-                diag["port_4712_open"] = f"check failed: {e}"
-
-            # Also try 127.0.0.1
-            try:
-                import socket
-                s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s2.settimeout(3)
-                r2 = s2.connect_ex(("127.0.0.1", int(EC_PORT)))
-                s2.close()
-                diag["port_4712_open_127"] = r2 == 0
-            except Exception:
-                pass
-
-            # 3. Passwords configured
-            diag["ec_host"] = EC_HOST
-            diag["ec_port"] = EC_PORT
-            diag["password_plain"] = EC_PASSWORD[:3] + "***" + EC_PASSWORD[-2:] if len(EC_PASSWORD) > 5 else repr(EC_PASSWORD)
-            diag["password_hash"] = EC_PASSWORD_HASH[:10] + "..." if EC_PASSWORD_HASH else "(empty)"
-            diag["password_mode_detected"] = _password_mode or "not yet"
-            diag["cred_file"] = _cred_file
-            diag["cred_file_exists"] = os.path.isfile(_cred_file)
-
-            # 4. Read what amule.conf says the ECPassword should be
-            amule_conf = os.path.join(AMULE_HOME, "amule.conf")
-            diag["amule_conf_exists"] = os.path.isfile(amule_conf)
-            if os.path.isfile(amule_conf):
-                try:
-                    with open(amule_conf) as f:
-                        for line in f:
-                            line = line.strip()
-                            if line.startswith("ECPassword="):
-                                conf_hash = line.split("=", 1)[1]
-                                diag["amule_conf_ECPassword"] = conf_hash
-                                diag["our_hash_matches_conf"] = (EC_PASSWORD_HASH == conf_hash)
-                                # Also check: maybe amulecmd needs the hash that's IN the conf
-                                if not diag.get("our_hash_matches_conf"):
-                                    diag["MISMATCH_DETAIL"] = f"amule.conf has '{conf_hash}' but we computed '{EC_PASSWORD_HASH}'"
-                                break
-                except Exception as e:
-                    diag["amule_conf_read_error"] = str(e)
-
-            # 5. Try raw amulecmd with plain password
-            raw_plain = _exec_amulecmd("status", EC_PASSWORD, timeout=8) if EC_PASSWORD else "(no plain pwd)"
-            diag["test_plain"] = raw_plain[:400]
-            diag["test_plain_auth_ok"] = "Authentication failed" not in str(raw_plain)
-
-            # 6. Try raw amulecmd with hash
-            if EC_PASSWORD_HASH:
-                raw_hash = _exec_amulecmd("status", EC_PASSWORD_HASH, timeout=8)
-                diag["test_hash"] = raw_hash[:400]
-                diag["test_hash_auth_ok"] = "Authentication failed" not in str(raw_hash)
-
-            # 7. Try with the hash FROM amule.conf directly
-            conf_hash = diag.get("amule_conf_ECPassword", "")
-            if conf_hash and conf_hash != EC_PASSWORD_HASH and conf_hash != EC_PASSWORD:
-                raw_conf = _exec_amulecmd("status", conf_hash, timeout=8)
-                diag["test_conf_hash"] = raw_conf[:400]
-                diag["test_conf_hash_auth_ok"] = "Authentication failed" not in str(raw_conf)
-
-            # 8. Recent dashboard logs
-            diag["recent_logs"] = list(_log_buffer)[-15:]
-
-            self.send_json(diag)
+            self.send_json(build_debug_snapshot())
 
         elif path == "/api/organize":
             try:
