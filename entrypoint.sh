@@ -462,20 +462,59 @@ else
     printf "[CONFIG] remote.conf existant\n"
 fi
 
-# Replace passwords using awk to target the correct sections
-if [ -n "${GUI_PWD:-}" ]; then
-    sed -i "s/^ECPassword=.*/ECPassword=${AMULE_GUI_ENCODED_PWD}/" "$AMULE_CONF"
-    # In remote.conf [EC] section
-    sed -i "s/^Password=.*/Password=${AMULE_GUI_ENCODED_PWD}/" "$REMOTE_CONF"
+# ═══════════════════════════════════════════
+# FORCE password update (always, even if conf existed)
+# ═══════════════════════════════════════════
+printf "\n━━━ Password synchronization ━━━\n"
+printf "  GUI_PWD env set: %s\n" "$([ -n "${GUI_PWD:-}" ] && echo 'yes' || echo 'no (auto-generated)')"
+printf "  Plain password:  %s***%s\n" "$(echo "$AMULE_GUI_PWD" | head -c2)" "$(echo "$AMULE_GUI_PWD" | tail -c3)"
+printf "  MD5 hash:        %s\n" "$AMULE_GUI_ENCODED_PWD"
+
+# Read what's currently in amule.conf
+CURRENT_EC_HASH=$(grep '^ECPassword=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
+printf "  Conf ECPassword: %s\n" "${CURRENT_EC_HASH:-'(none)'}"
+
+if [ "$CURRENT_EC_HASH" != "$AMULE_GUI_ENCODED_PWD" ]; then
+    printf "  [!] MISMATCH — updating amule.conf and remote.conf\n"
+
+    # Force update ECPassword in amule.conf [ExternalConnect] section
+    awk -v hash="$AMULE_GUI_ENCODED_PWD" '
+        /^\[ExternalConnect\]/{s=1}
+        /^\[/{if(!/^\[ExternalConnect\]/)s=0}
+        s && /^ECPassword=/{$0="ECPassword="hash}
+        {print}
+    ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
+
+    # Force update Password in remote.conf [EC] section
+    awk -v hash="$AMULE_GUI_ENCODED_PWD" '
+        /^\[EC\]/{s=1}
+        /^\[/{if(!/^\[EC\]/)s=0}
+        s && /^Password=/{$0="Password="hash}
+        {print}
+    ' "$REMOTE_CONF" > "${REMOTE_CONF}.tmp" && mv "${REMOTE_CONF}.tmp" "$REMOTE_CONF"
+
+    # Verify it took
+    NEW_HASH=$(grep '^ECPassword=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
+    if [ "$NEW_HASH" = "$AMULE_GUI_ENCODED_PWD" ]; then
+        printf "  [✓] ECPassword updated successfully\n"
+    else
+        printf "  [✗] UPDATE FAILED — got '%s', expected '%s'\n" "$NEW_HASH" "$AMULE_GUI_ENCODED_PWD"
+        printf "  [!] Brute-force rewrite...\n"
+        sed -i "s/^ECPassword=.*/ECPassword=${AMULE_GUI_ENCODED_PWD}/" "$AMULE_CONF"
+    fi
+else
+    printf "  [✓] ECPassword already matches\n"
 fi
+
+# Update WebUI password in amule.conf [WebServer] section
 if [ -n "${WEBUI_PWD:-}" ]; then
-    # Only replace Password= inside [WebServer] section of amule.conf
     awk -v pwd="${AMULE_WEBUI_ENCODED_PWD}" '
         /^\[WebServer\]/{s=1} /^\[/{if(!/^\[WebServer\]/)s=0}
         s && /^Password=/{$0="Password="pwd} {print}
     ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
     sed -i "s|^AdminPassword=.*|AdminPassword=${AMULE_WEBUI_ENCODED_PWD}|" "$REMOTE_CONF"
 fi
+printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
 chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_INCOMING"
 chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_TEMP"
