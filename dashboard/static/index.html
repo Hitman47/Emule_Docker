@@ -418,9 +418,48 @@ tr:hover{background:var(--bg3)}
   <div class="panel" id="panel-downloads">
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="loadDownloads()">🔄 Rafraîchir</button>
-      <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)">▶ Tout reprendre</button>
-      <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)">⏸ Tout pauser</button>
+      <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)" data-requires-write="1">▶ Tout reprendre</button>
+      <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)" data-requires-write="1">⏸ Tout pauser</button>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
+    </div>
+    <div class="card" style="margin-bottom:12px;padding:12px">
+      <div style="display:grid;grid-template-columns:2fr 170px 180px;gap:8px;align-items:end">
+        <div>
+          <div class="label" style="margin-bottom:4px">Filtre nom</div>
+          <input type="text" id="downloadNameFilter" placeholder="nom du fichier" oninput="applyDownloadFilters()">
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">État</div>
+          <select id="downloadStatusFilter" onchange="applyDownloadFilters()">
+            <option value="all">Tous</option>
+            <option value="active">Actifs</option>
+            <option value="downloading">Téléchargement</option>
+            <option value="waiting">En attente</option>
+            <option value="paused">En pause</option>
+            <option value="error">Erreurs</option>
+            <option value="complete">Terminés</option>
+          </select>
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Tri</div>
+          <select id="downloadSort" onchange="applyDownloadFilters()">
+            <option value="speed_desc">Vitesse ↓</option>
+            <option value="progress_desc">Progression ↓</option>
+            <option value="sources_desc">Sources ↓</option>
+            <option value="name_asc">Nom A→Z</option>
+            <option value="status_asc">État A→Z</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(true)">☑ Sélectionner affichés</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(false)">☐ Désélectionner</button>
+        <button class="btn btn-ghost btn-sm" onclick="handleSelectedTransferAction('pause', this)" data-requires-write="1">⏸ Pause sélection</button>
+        <button class="btn btn-green btn-sm" onclick="handleSelectedTransferAction('resume', this)" data-requires-write="1">▶ Reprendre sélection</button>
+        <button class="btn btn-red btn-sm" onclick="handleSelectedTransferAction('cancel', this)" data-requires-write="1">✕ Supprimer sélection</button>
+        <span id="downloadFiltersInfo" style="font-size:.76em;color:var(--text3);margin-left:auto">Aucun transfert</span>
+      </div>
+      <div id="downloadsSummaryCards" class="detail-grid" style="margin-top:12px"></div>
     </div>
     <div id="downloadsTable">
       <div class="loading"><div class="spinner"></div></div>
@@ -668,6 +707,9 @@ let currentCat = 'all';
 let refreshInterval;
 let selectedDownloadHash = '';
 let appConfig = null;
+window._downloadsAll = [];
+window._filteredDownloads = [];
+window._selectedDownloadHashes = new Set();
 
 // ── Tab navigation ──
 document.querySelectorAll('.tab').forEach(t => {
@@ -890,6 +932,131 @@ function updateDisk(id, info) {
 }
 
 // ── Downloads ──
+function getDownloadFilters() {
+  return {
+    name: (document.getElementById('downloadNameFilter')?.value || '').trim().toLowerCase(),
+    status: document.getElementById('downloadStatusFilter')?.value || 'all',
+    sort: document.getElementById('downloadSort')?.value || 'speed_desc',
+  };
+}
+
+function downloadMatchesFilter(dl, statusFilter) {
+  const status = String(dl?.status || '').toLowerCase();
+  const waitingStates = new Set(['waiting', 'getting sources', 'connecting', 'queued', 'allocating']);
+  if (statusFilter === 'all') return true;
+  if (statusFilter === 'active') return !waitingStates.has(status) && !['paused', 'stopped', 'error', 'complete'].includes(status);
+  if (statusFilter === 'paused') return ['paused', 'stopped'].includes(status);
+  if (statusFilter === 'waiting') return waitingStates.has(status);
+  if (statusFilter === 'downloading') return ['downloading', 'hashing', 'completing'].includes(status);
+  if (statusFilter === 'error') return status === 'error';
+  if (statusFilter === 'complete') return status === 'complete';
+  return status === statusFilter;
+}
+
+function renderDownloadsSummary(summary, filtered) {
+  const box = document.getElementById('downloadsSummaryCards');
+  if (!box) return;
+  const s = summary || {total: 0, active: 0, paused: 0, waiting: 0, errors: 0, total_speed: 0, avg_progress: 0};
+  const visibleCount = Array.isArray(filtered) ? filtered.length : 0;
+  const cards = [
+    ['Affichés', visibleCount],
+    ['Actifs', s.active || 0],
+    ['En pause', s.paused || 0],
+    ['Attente', s.waiting || 0],
+    ['Erreurs', s.errors || 0],
+    ['Vitesse totale', (s.total_speed || 0) > 0 ? Number(s.total_speed).toFixed(1) + ' KB/s' : '—'],
+  ];
+  box.innerHTML = cards.map(([k, v]) => `<div class="detail-chip"><div class="k">${esc(String(k))}</div><div class="v">${esc(String(v))}</div></div>`).join('');
+}
+
+function updateDownloadFiltersInfo(total, filtered) {
+  const selected = window._selectedDownloadHashes ? window._selectedDownloadHashes.size : 0;
+  const el = document.getElementById('downloadFiltersInfo');
+  if (!el) return;
+  el.textContent = `${filtered} affiché(s) / ${total} total — ${selected} sélectionné(s)`;
+}
+
+function toggleDownloadSelection(hash, checked) {
+  if (!window._selectedDownloadHashes) window._selectedDownloadHashes = new Set();
+  if (checked) window._selectedDownloadHashes.add(hash);
+  else window._selectedDownloadHashes.delete(hash);
+  updateDownloadFiltersInfo((window._downloadsAll || []).length, (window._filteredDownloads || []).length);
+}
+
+function toggleSelectVisibleDownloads(checked) {
+  if (!window._selectedDownloadHashes) window._selectedDownloadHashes = new Set();
+  for (const dl of (window._filteredDownloads || [])) {
+    if (checked) window._selectedDownloadHashes.add(dl.hash);
+    else window._selectedDownloadHashes.delete(dl.hash);
+  }
+  renderDownloadsTable(window._filteredDownloads || [], window._downloadsSummary || {});
+}
+
+function applyDownloadFilters() {
+  const all = Array.isArray(window._downloadsAll) ? window._downloadsAll.slice() : [];
+  const filters = getDownloadFilters();
+  let filtered = all.filter(dl => {
+    const name = String(dl?.name || '').toLowerCase();
+    if (filters.name && !name.includes(filters.name)) return false;
+    if (!downloadMatchesFilter(dl, filters.status)) return false;
+    return true;
+  });
+  const sorters = {
+    speed_desc: (a, b) => (b.speed || 0) - (a.speed || 0) || (b.sources || 0) - (a.sources || 0),
+    progress_desc: (a, b) => (b.progress || 0) - (a.progress || 0) || (b.speed || 0) - (a.speed || 0),
+    sources_desc: (a, b) => (b.sources || 0) - (a.sources || 0) || (b.speed || 0) - (a.speed || 0),
+    name_asc: (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'fr', {sensitivity: 'base'}),
+    status_asc: (a, b) => String(a.status || '').localeCompare(String(b.status || ''), 'fr', {sensitivity: 'base'}) || String(a.name || '').localeCompare(String(b.name || ''), 'fr', {sensitivity: 'base'}),
+  };
+  filtered.sort(sorters[filters.sort] || sorters.speed_desc);
+  window._filteredDownloads = filtered;
+  renderDownloadsTable(filtered, window._downloadsSummary || {});
+}
+
+function renderDownloadsTable(downloads, summary = {}) {
+  const container = document.getElementById('downloadsTable');
+  const d = Array.isArray(downloads) ? downloads : [];
+  renderDownloadsSummary(summary, d);
+  updateDownloadFiltersInfo((window._downloadsAll || []).length, d.length);
+
+  if (d.length === 0) {
+    container.innerHTML = '<div class="empty">Aucun transfert correspondant</div>';
+    return;
+  }
+
+  let html = '<table><thead><tr><th><input type="checkbox" onclick="toggleSelectVisibleDownloads(this.checked)"></th><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th><th></th></tr></thead><tbody>';
+  d.forEach(dl => {
+    const statusColor = dl.status === 'downloading' ? 'var(--green)' :
+                        dl.status === 'paused' || dl.status === 'stopped' ? 'var(--orange)' :
+                        dl.status === 'error' ? 'var(--red)' :
+                        dl.status === 'waiting' || dl.status === 'getting sources' ? 'var(--blue)' : 'var(--text3)';
+    const checked = window._selectedDownloadHashes?.has(dl.hash) ? 'checked' : '';
+    const eta = dl.eta || '—';
+    html += `<tr>
+      <td><input type="checkbox" ${checked} onchange="toggleDownloadSelection('${dl.hash}', this.checked)"></td>
+      <td class="fname" title="${esc(dl.name)}"><span class="row-link" onclick="loadDownloadDetail('${dl.hash}')">${esc(dl.name)}</span></td>
+      <td>${dl.size || '—'}</td>
+      <td style="min-width:120px">
+        <div class="pbar"><div class="fill dl" style="width:${dl.progress}%"></div></div>
+        <span style="font-size:.75em;color:var(--text3)">${dl.progress.toFixed(1)}%</span>
+      </td>
+      <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '—'}</td>
+      <td>${dl.sources || '—'}</td>
+      <td style="font-size:.82em;color:var(--text2)">${eta}</td>
+      <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="loadDownloadDetail('${dl.hash}')" title="Détail">ℹ️</button>
+        ${dl.status === 'paused' || dl.status === 'stopped'
+          ? `<button class="btn btn-green btn-sm" onclick="handleTransferAction('resume','${dl.hash}', this)" title="Reprendre" ${readonlyDisabledAttr()}>▶</button>`
+          : `<button class="btn btn-ghost btn-sm" onclick="handleTransferAction('pause','${dl.hash}', this)" title="Pause" ${readonlyDisabledAttr()}>⏸</button>`}
+        <button class="btn btn-red btn-sm" onclick="handleTransferAction('cancel','${dl.hash}', this)" title="Supprimer" style="margin-left:2px" ${readonlyDisabledAttr()}>✕</button>
+      </td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
 async function loadDownloads() {
   const resp = await api('/api/downloads');
   const container = document.getElementById('downloadsTable');
@@ -901,77 +1068,25 @@ async function loadDownloads() {
     return;
   }
 
-  // Show raw output for debugging
   if (rawEl) rawEl.textContent = resp.raw || '(vide)';
   if (refreshInfo) refreshInfo.textContent = 'MAJ: ' + new Date().toLocaleTimeString('fr-FR');
 
   const d = resp.downloads || [];
-
-  if (d.length === 0) {
-    container.innerHTML = '<div class="empty">Aucun transfert en cours</div>';
-    document.getElementById('activeDl').textContent = '0';
-    // Clear badge
-    const dlTab = document.querySelector('[data-tab="downloads"]');
-    const badge = dlTab.querySelector('.tab-badge');
-    if (badge) badge.remove();
-    return;
-  }
+  window._downloadsAll = d.map(item => ({...item, eta: item.eta || item.eta_text || item.etaText || item.eta_estimate || item.eta || '—'}));
+  window._downloadsSummary = resp.summary || {};
 
   document.getElementById('activeDl').textContent = d.length;
-
-  // Update downloads tab badge
   const dlTab = document.querySelector('[data-tab="downloads"]');
   const existingBadge = dlTab.querySelector('.tab-badge');
   if (existingBadge) existingBadge.remove();
-  const badge = document.createElement('span');
-  badge.className = 'tab-badge';
-  badge.textContent = d.length;
-  dlTab.appendChild(badge);
+  if (d.length > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'tab-badge';
+    badge.textContent = d.length;
+    dlTab.appendChild(badge);
+  }
 
-  let html = '<table><thead><tr><th>Fichier</th><th>Taille</th><th>Progression</th><th>Vitesse</th><th>Sources</th><th>ETA</th><th>État</th><th></th></tr></thead><tbody>';
-  d.forEach(dl => {
-    const statusColor = dl.status === 'downloading' ? 'var(--green)' :
-                        dl.status === 'paused' || dl.status === 'stopped' ? 'var(--orange)' :
-                        dl.status === 'error' ? 'var(--red)' :
-                        dl.status === 'waiting' || dl.status === 'getting sources' ? 'var(--blue)' : 'var(--text3)';
-    let eta = '\u2014';
-    if (dl.speed > 0 && dl.progress > 0 && dl.progress < 100) {
-      const sizeMatch = (dl.size || '').match(/([\d.]+)\s*(KB|MB|GB|TB)/i);
-      if (sizeMatch) {
-        const sizeVal = parseFloat(sizeMatch[1]);
-        const unit = sizeMatch[2].toUpperCase();
-        const mult = {KB:1, MB:1024, GB:1048576, TB:1073741824};
-        const totalKB = sizeVal * (mult[unit] || 1);
-        const remainKB = totalKB * (1 - dl.progress / 100);
-        const secs = remainKB / dl.speed;
-        if (secs < 60) eta = Math.round(secs) + 's';
-        else if (secs < 3600) eta = Math.round(secs / 60) + 'min';
-        else if (secs < 86400) eta = Math.round(secs / 3600) + 'h ' + Math.round((secs % 3600) / 60) + 'min';
-        else eta = Math.round(secs / 86400) + 'j';
-      }
-    }
-    html += `<tr>
-      <td class="fname" title="${esc(dl.name)}"><span class="row-link" onclick="loadDownloadDetail('${dl.hash}')">${esc(dl.name)}</span></td>
-      <td>${dl.size || '\u2014'}</td>
-      <td style="min-width:120px">
-        <div class="pbar"><div class="fill dl" style="width:${dl.progress}%"></div></div>
-        <span style="font-size:.75em;color:var(--text3)">${dl.progress.toFixed(1)}%</span>
-      </td>
-      <td>${dl.speed > 0 ? dl.speed.toFixed(1) + ' KB/s' : '\u2014'}</td>
-      <td>${dl.sources || '\u2014'}</td>
-      <td style="font-size:.82em;color:var(--text2)">${eta}</td>
-      <td style="color:${statusColor};font-weight:600;font-size:.82em">${dl.status}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-ghost btn-sm" onclick="loadDownloadDetail('${dl.hash}')" title="Détail">ℹ️</button>
-        ${dl.status === 'paused' || dl.status === 'stopped'
-          ? `<button class=\"btn btn-green btn-sm\" onclick=\"handleTransferAction('resume','${dl.hash}', this)\" title=\"Reprendre\" ${readonlyDisabledAttr()}>▶</button>`
-          : `<button class=\"btn btn-ghost btn-sm\" onclick=\"handleTransferAction('pause','${dl.hash}', this)\" title=\"Pause\" ${readonlyDisabledAttr()}>⏸</button>`}
-        <button class=\"btn btn-red btn-sm\" onclick=\"handleTransferAction('cancel','${dl.hash}', this)\" title=\"Supprimer\" style=\"margin-left:2px\" ${readonlyDisabledAttr()}>✕</button>
-      </td>
-    </tr>`;
-  });
-  html += '</tbody></table>';
-  container.innerHTML = html;
+  applyDownloadFilters();
 
   if (selectedDownloadHash) {
     const exists = d.some(item => item.hash === selectedDownloadHash);
@@ -1011,9 +1126,9 @@ async function loadDownloadDetail(hash) {
         <div class="detail-chip"><div class="k">ETA</div><div class="v">${esc(dl.eta || '—')}</div></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-        ${dl.can_resume ? `<button class="btn btn-green btn-sm" onclick="handleTransferAction('resume','${dl.hash}', this)">▶ Reprendre</button>` : ''}
-        ${dl.can_pause ? `<button class="btn btn-ghost btn-sm" onclick="handleTransferAction('pause','${dl.hash}', this)">⏸ Pause</button>` : ''}
-        <button class="btn btn-red btn-sm" onclick="handleTransferAction('cancel','${dl.hash}', this)">✕ Supprimer</button>
+        ${dl.can_resume ? `<button class="btn btn-green btn-sm" onclick="handleTransferAction('resume','${dl.hash}', this)" ${readonlyDisabledAttr()}>▶ Reprendre</button>` : ''}
+        ${dl.can_pause ? `<button class="btn btn-ghost btn-sm" onclick="handleTransferAction('pause','${dl.hash}', this)" ${readonlyDisabledAttr()}>⏸ Pause</button>` : ''}
+        <button class="btn btn-red btn-sm" onclick="handleTransferAction('cancel','${dl.hash}', this)" ${readonlyDisabledAttr()}>✕ Supprimer</button>
       </div>
       <div class="label" style="margin-bottom:6px">Bloc brut aMule</div>
       <pre class="raw-block">${esc(dl.raw_block || '(aucune sortie brute)')}</pre>
@@ -1023,6 +1138,37 @@ async function loadDownloadDetail(hash) {
 
 function refreshSelectedDownloadDetail() {
   if (selectedDownloadHash) loadDownloadDetail(selectedDownloadHash);
+}
+
+async function handleSelectedTransferAction(action, btn = null) {
+  if (!ensureWritable('Cette action de lot')) return null;
+  const hashes = Array.from(window._selectedDownloadHashes || []).filter(Boolean);
+  if (!hashes.length) {
+    showToast('err', 'Aucun transfert sélectionné');
+    return null;
+  }
+  if (action === 'cancel' && !confirm(`Supprimer ${hashes.length} transfert(s) sélectionné(s) ?`)) {
+    return null;
+  }
+  setButtonPending(btn, true, action === 'pause' ? 'Pause...' : action === 'resume' ? 'Reprise...' : 'Suppression...');
+  const d = await api('/api/transfers/bulk_action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action, hashes}),
+  });
+  setButtonPending(btn, false);
+  if (d?.ok) {
+    showToast(d.code === 'PARTIAL_SUCCESS' ? 'info' : 'ok', getActionMessage(d, 'Action exécutée'));
+    if (action === 'cancel') hashes.forEach(h => window._selectedDownloadHashes.delete(h));
+    await loadDownloads();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur de lot'));
+  }
+  if (getActiveTab() === 'settings') {
+    loadActionHistory();
+    runDebug();
+  }
+  return d;
 }
 
 // ── Search ──
@@ -1692,6 +1838,19 @@ function renderAppConfig(config) {
   setVal('cfgWriteRate', appConfig.write_rate_limit_per_minute || 30);
   setVal('cfgLoginRate', appConfig.login_rate_limit_per_minute || 20);
   if (summary) summary.textContent = `${appConfig.read_only ? 'Lecture seule' : 'Écriture autorisée'} · Refresh ${appConfig.refresh_interval_sec || 5}s · Historique ${appConfig.action_history_limit || 80} · Debug ${appConfig.debug_mode ? 'ON' : 'OFF'}`;
+  document.querySelectorAll('[data-requires-write="1"]').forEach(el => {
+    el.disabled = !!appConfig.read_only;
+    if (appConfig.read_only) {
+      el.dataset.readonlyTitle = el.title || '';
+      el.title = 'Mode lecture seule';
+      el.style.opacity = '.55';
+      el.style.cursor = 'not-allowed';
+    } else {
+      if (el.dataset.readonlyTitle !== undefined) el.title = el.dataset.readonlyTitle;
+      el.style.opacity = '';
+      el.style.cursor = '';
+    }
+  });
   renderSystemModeBanner();
   restartAutoRefresh();
 }

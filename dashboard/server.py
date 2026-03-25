@@ -904,6 +904,61 @@ def get_download_detail(hash_value, raw=None, downloads=None):
     return target
 
 
+def summarize_downloads(downloads):
+    summary = {
+        "total": len(downloads or []),
+        "active": 0,
+        "paused": 0,
+        "waiting": 0,
+        "errors": 0,
+        "completed": 0,
+        "total_speed": 0.0,
+        "total_sources": 0,
+        "avg_progress": 0.0,
+        "counts_by_status": {},
+    }
+    if not downloads:
+        return summary
+
+    waiting_states = {"waiting", "getting sources", "connecting", "queued", "allocating"}
+    paused_states = {"paused", "stopped"}
+    active_states = {"downloading", "hashing", "completing"}
+
+    progress_values = []
+    for dl in downloads:
+        status = str(dl.get("status") or "queued")
+        summary["counts_by_status"][status] = summary["counts_by_status"].get(status, 0) + 1
+        if status in paused_states:
+            summary["paused"] += 1
+        elif status in waiting_states:
+            summary["waiting"] += 1
+        elif status == "error":
+            summary["errors"] += 1
+        elif status == "complete":
+            summary["completed"] += 1
+        elif status in active_states:
+            summary["active"] += 1
+        else:
+            summary["waiting"] += 1
+        try:
+            summary["total_speed"] += float(dl.get("speed") or 0)
+        except Exception:
+            pass
+        try:
+            summary["total_sources"] += int(dl.get("sources") or 0)
+        except Exception:
+            pass
+        try:
+            progress_values.append(float(dl.get("progress") or 0))
+        except Exception:
+            pass
+
+    if progress_values:
+        summary["avg_progress"] = round(sum(progress_values) / len(progress_values), 1)
+    summary["total_speed"] = round(summary["total_speed"], 1)
+    return summary
+
+
 def parse_search_results(raw):
     """Parse amulecmd 'results' output.
     
@@ -1594,6 +1649,139 @@ def change_transfer_state(action, hash_value=None):
     return action_response(action, True, "SUCCESS", message, confirmed=confirmed, data={"before_active": before_active, "after_active": after_active, "before_paused": before_paused, "after_paused": after_paused})
 
 
+def change_transfer_state_bulk(action, hashes):
+    action = str(action or "").strip().lower()
+    if action not in {"pause", "resume", "cancel"}:
+        return action_response(f"bulk_{action or 'unknown'}", False, "INVALID_INPUT", "Action de lot invalide.", status=400)
+
+    raw_hashes = hashes if isinstance(hashes, list) else []
+    cleaned = []
+    seen = set()
+    for value in raw_hashes:
+        h = str(value or "").strip()
+        if not re.fullmatch(r"[0-9A-Fa-f]{32}", h):
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        cleaned.append(h)
+    if not cleaned:
+        return action_response(f"bulk_{action}", False, "INVALID_INPUT", "Aucun hash de transfert valide fourni.", status=400)
+
+    before = parse_downloads(run_amulecmd("show dl"))
+    before_map = {d.get("hash"): d for d in before if d.get("hash")}
+    valid_hashes = []
+    results = []
+
+    for h in cleaned:
+        dl = before_map.get(h)
+        if not dl:
+            results.append({
+                "hash": h,
+                "ok": False,
+                "confirmed": False,
+                "code": "TRANSFER_NOT_FOUND",
+                "message": normalize_action_error(action, "TRANSFER_NOT_FOUND"),
+            })
+            continue
+        valid_hashes.append(h)
+        results.append({
+            "hash": h,
+            "name": dl.get("name", ""),
+            "before_status": dl.get("status", ""),
+            "ok": False,
+            "confirmed": False,
+            "code": "PENDING",
+            "message": "En attente de confirmation",
+        })
+
+    if not valid_hashes:
+        return action_response(f"bulk_{action}", False, "TRANSFER_NOT_FOUND", "Aucun transfert sélectionné n'existe encore dans aMule.", status=404, data={"results": results})
+
+    command = {"pause": "pause", "resume": "resume", "cancel": "cancel"}[action]
+    interactive_output = run_amulecmd_interactive([f"{command} {h}" for h in valid_hashes], timeout=max(25, 5 + len(valid_hashes) * 3))
+    err = classify_amule_error(interactive_output)
+    time.sleep(0.8)
+    after = parse_downloads(run_amulecmd("show dl"))
+    after_map = {d.get("hash"): d for d in after if d.get("hash")}
+    target_states = {"pause": {"paused", "stopped"}, "resume": {"downloading", "waiting", "getting sources", "connecting", "queued", "allocating", "completing"}}.get(action, set())
+
+    success = 0
+    already = 0
+    failed = 0
+    confirmed_count = 0
+
+    for item in results:
+        if item.get("code") == "TRANSFER_NOT_FOUND":
+            failed += 1
+            continue
+        h = item.get("hash")
+        after_dl = after_map.get(h)
+        item["after_status"] = after_dl.get("status") if after_dl else None
+        if action == "cancel":
+            if not after_dl:
+                item.update({"ok": True, "confirmed": True, "code": "SUCCESS", "message": "Suppression confirmée."})
+                success += 1
+                confirmed_count += 1
+            else:
+                item.update({"code": "STATE_NOT_CONFIRMED", "message": normalize_action_error(action, "STATE_NOT_CONFIRMED")})
+                failed += 1
+            continue
+
+        before_status = item.get("before_status") or ""
+        after_status = item.get("after_status") or ""
+        if action == "pause" and before_status in target_states and after_status in target_states:
+            item.update({"ok": True, "confirmed": True, "code": "ALREADY_EXISTS", "message": "Déjà en pause."})
+            already += 1
+            confirmed_count += 1
+        elif action == "resume" and before_status not in {"paused", "stopped"} and after_status not in {"paused", "stopped"}:
+            item.update({"ok": True, "confirmed": True, "code": "ALREADY_EXISTS", "message": "Déjà actif."})
+            already += 1
+            confirmed_count += 1
+        elif after_dl and after_status in target_states:
+            item.update({"ok": True, "confirmed": True, "code": "SUCCESS", "message": "Pause confirmée." if action == "pause" else "Reprise confirmée."})
+            success += 1
+            confirmed_count += 1
+        else:
+            item.update({"code": "STATE_NOT_CONFIRMED", "message": normalize_action_error(action, "STATE_NOT_CONFIRMED")})
+            failed += 1
+
+    cache_clear("downloads")
+
+    summary = {
+        "total": len(cleaned),
+        "valid": len(valid_hashes),
+        "success": success,
+        "already": already,
+        "failed": failed,
+        "missing": sum(1 for r in results if r.get("code") == "TRANSFER_NOT_FOUND"),
+    }
+    if failed == 0 and summary["missing"] == 0 and success > 0:
+        code = "SUCCESS"
+        ok = True
+        status = 200
+    elif success > 0 or already > 0:
+        code = "PARTIAL_SUCCESS"
+        ok = True
+        status = 207
+    elif err:
+        code = err
+        ok = False
+        status = 502
+    else:
+        code = "STATE_NOT_CONFIRMED"
+        ok = False
+        status = 502
+
+    action_label = {"pause": "Pause", "resume": "Reprise", "cancel": "Suppression"}[action]
+    message = f"{action_label} lot: {success} confirmé(s), {already} déjà OK, {summary['missing']} introuvable(s), {failed} échec(s)."
+    return action_response(f"bulk_{action}", ok, code, message, confirmed=(confirmed_count == len(valid_hashes) and summary["missing"] == 0), status=status, data={
+        "summary": summary,
+        "results": results[:200],
+        "output": interactive_output if err else "",
+    })
+
+
 def execute_locked_action(action, fn):
     lock = acquire_action_lock(action)
     if not lock:
@@ -1745,8 +1933,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/downloads":
             raw = run_amulecmd("show dl")
             data = parse_downloads(raw)
-            cache_set("downloads", {"downloads": data, "raw": raw})
-            self.send_json({"downloads": data, "raw": raw, "count": len(data)})
+            for item in data:
+                item["eta"] = estimate_eta_text(item)
+            summary = summarize_downloads(data)
+            cache_set("downloads", {"downloads": data, "raw": raw, "summary": summary})
+            self.send_json({"downloads": data, "raw": raw, "count": len(data), "summary": summary})
 
         elif path == "/api/download_detail":
             hash_value = qs.get("hash", [""])[0]
@@ -2052,6 +2243,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/action_history/clear":
             clear_action_history_store()
             self.send_json({"ok": True, "message": "Historique des actions vidé."})
+            return
+
+        if parsed.path == "/api/transfers/bulk_action":
+            blocked = guard_write_action(self, "bulk_action")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            action = str(data.get("action") or "").strip().lower()
+            hashes = data.get("hashes") if isinstance(data.get("hashes"), list) else []
+            payload, status = execute_locked_action(f"bulk_{action or 'unknown'}", lambda: change_transfer_state_bulk(action, hashes))
+            self.send_json(payload, status)
             return
 
         if parsed.path == "/api/logout":
