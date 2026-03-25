@@ -364,16 +364,28 @@ def _log(msg):
 
 
 def _clean_amulecmd_output(output):
-    """Remove amulecmd header lines from output."""
+    """Remove amulecmd header lines, keep status lines (starting with >)."""
     lines = output.split("\n")
     clean = []
     skip_header = True
     for line in lines:
-        if skip_header and ("Connected to" in line or "This is amulecmd" in line
-                            or "Creating client" in line or "---" in line
-                            or line.strip() == "" or "aMule" in line):
+        # Status lines always start with ">" — never skip them
+        if line.strip().startswith(">"):
+            skip_header = False
+            clean.append(line)
             continue
-        skip_header = False
+        # Skip header boilerplate
+        if skip_header:
+            stripped = line.strip()
+            if (not stripped
+                    or "This is amulecmd" in line
+                    or "Creating client" in line
+                    or "Succeeded!" in line
+                    or "Connection established" in line
+                    or stripped == "---"):
+                continue
+            # Any other non-empty line ends the header
+            skip_header = False
         clean.append(line)
     return "\n".join(clean).strip()
 
