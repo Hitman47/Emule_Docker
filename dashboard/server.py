@@ -1010,6 +1010,26 @@ def parse_ed2k_link(link):
         return None
     return {"name": match.group(1), "size": int(match.group(2)), "hash": match.group(3).upper(), "link": link}
 
+def extract_ed2k_links(text):
+    raw = (text or '').strip()
+    if not raw:
+        return []
+    matches = re.findall(r'ed2k://\|.*?\|/', raw, flags=re.I | re.S)
+    if not matches and raw.lower().startswith('ed2k://'):
+        matches = [raw]
+    cleaned = []
+    seen = set()
+    for match in matches:
+        link = re.sub(r'\s+', '', match.strip())
+        if not link or not link.lower().startswith('ed2k://'):
+            continue
+        key = link.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(link)
+    return cleaned
+
 
 def size_to_bytes(size_text):
     if not size_text:
@@ -1173,6 +1193,68 @@ def add_ed2k_confirmed(link):
         return action_response("add_ed2k", True, "SUCCESS", msg, confirmed=confirmed, data={"before_count": len(before_servers), "after_count": len(after_servers), "link": link})
 
     return action_response("add_ed2k", False, "INVALID_INPUT", normalize_action_error("add_ed2k", "INVALID_INPUT"), status=400)
+
+
+def add_multiple_ed2k_confirmed(raw_text):
+    links = extract_ed2k_links(raw_text)
+    if not links:
+        return action_response('add_ed2k', False, 'INVALID_INPUT', 'Aucun lien ED2K valide trouvé.', status=400)
+    if len(links) == 1:
+        return add_ed2k_confirmed(links[0])
+
+    added = 0
+    already = 0
+    failed = 0
+    confirmed_count = 0
+    results = []
+
+    for link in links:
+        payload, status = add_ed2k_confirmed(link)
+        info = {
+            'link': link,
+            'ok': bool(payload.get('ok')),
+            'confirmed': bool(payload.get('confirmed')),
+            'code': payload.get('code'),
+            'message': payload.get('message', ''),
+        }
+        dl = (payload.get('data') or {}).get('download') or (payload.get('data') or {}).get('existing')
+        if isinstance(dl, dict) and dl.get('name'):
+            info['name'] = dl.get('name')
+        results.append(info)
+        if payload.get('ok') and payload.get('code') == 'SUCCESS':
+            added += 1
+        elif payload.get('code') == 'ALREADY_EXISTS':
+            already += 1
+        else:
+            failed += 1
+        if payload.get('confirmed'):
+            confirmed_count += 1
+
+    if failed == 0 and added > 0:
+        code = 'SUCCESS'
+        ok = True
+        status = 200
+    elif failed == 0 and already > 0:
+        code = 'ALREADY_EXISTS'
+        ok = True
+        status = 200
+    elif added > 0 or already > 0:
+        code = 'PARTIAL_SUCCESS'
+        ok = True
+        status = 207
+    else:
+        code = 'COMMAND_FAILED'
+        ok = False
+        status = 502
+
+    message = f"Traitement ED2K: {added} ajouté(s), {already} déjà présent(s), {failed} échec(s)."
+    return action_response('add_ed2k', ok, code, message, confirmed=(confirmed_count == len(links) and len(links) > 0), status=status, data={
+        'total': len(links),
+        'added': added,
+        'already_exists': already,
+        'failed': failed,
+        'results': results[:50],
+    })
 
 
 def change_transfer_state(action, hash_value=None):
@@ -1394,8 +1476,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(payload, status)
 
         elif path == "/api/add_ed2k":
-            link = qs.get("link", [""])[0].strip()
-            payload, status = execute_locked_action("add_ed2k", lambda: add_ed2k_confirmed(link))
+            link = qs.get("link", [""])[0]
+            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link))
             self.send_json(payload, status)
 
         elif path == "/api/files":
@@ -1602,8 +1684,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/add_ed2k":
-            link = str(data.get("link", "")).strip()
-            payload, status = execute_locked_action("add_ed2k", lambda: add_ed2k_confirmed(link))
+            link_blob = str(data.get("link") or data.get("text") or "")
+            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
             self.send_json(payload, status)
         elif parsed.path == "/api/server_sources/import":
             sources = data.get("sources") or []
@@ -1709,8 +1791,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True, "removed": removed})
 
         elif parsed.path == "/api/favorites/download":
-            link = str(data.get("link", "")).strip()
-            payload, status = execute_locked_action("add_ed2k", lambda: add_ed2k_confirmed(link))
+            link_blob = str(data.get("link") or data.get("text") or "")
+            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
             self.send_json(payload, status)
 
         elif parsed.path == "/api/search_history/clear":
