@@ -390,6 +390,8 @@ tr:hover{background:var(--bg3)}
       <div class="spinner"></div> Recherche en cours...
     </div>
 
+    <div id="searchDownloadReport" class="card" style="display:none;margin:12px 0;padding:12px;border:1px solid var(--border)"></div>
+
     <!-- Favorites panel (hidden by default) -->
     <div id="favoritesPanel" style="display:none;margin-bottom:16px">
       <div class="card">
@@ -1263,6 +1265,66 @@ function renderTransferActionReport(resp, action = '') {
   `;
 }
 
+function renderSearchDownloadReport(resp, action = '') {
+  const box = document.getElementById('searchDownloadReport');
+  if (!box) return;
+  if (!resp) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const data = resp.data || {};
+  const overview = data.overview || {};
+  const counts = overview.counts_by_code || {[resp.code || 'UNKNOWN']: 1};
+  const chips = [];
+  const addChip = (label, value) => chips.push(`<div class="detail-chip"><div class="k">${esc(String(label))}</div><div class="v">${esc(String(value))}</div></div>`);
+  if (data.summary) {
+    addChip('Résultats', data.summary.total ?? 0);
+    addChip('Ajoutés', data.summary.success ?? 0);
+    addChip('Déjà présents', data.summary.already ?? 0);
+    addChip('Échecs', data.summary.failed ?? 0);
+    addChip('Introuvables', data.summary.missing ?? 0);
+  } else {
+    addChip('Code', resp.code || 'UNKNOWN');
+    addChip('Confirmé', resp.confirmed ? 'Oui' : 'Non');
+  }
+  Object.entries(counts).slice(0, 4).forEach(([code, value]) => addChip(code, value));
+  let items = [];
+  if (Array.isArray(data.results) && data.results.length) items = data.results;
+  else {
+    const fallback = (window._lastResultsAll || []).find(x => x.id === Number(data.id || 0));
+    items = [{
+      id: data.id || fallback?.id || 0,
+      name: data.download?.name || fallback?.name || '',
+      size: fallback?.size || '',
+      sources: fallback?.sources || 0,
+      code: resp.code || 'UNKNOWN',
+      message: resp.message || '',
+      confirmed: !!resp.confirmed,
+      ok: !!resp.ok,
+    }];
+  }
+  const focusItems = items.filter(item => ['STATE_NOT_CONFIRMED', 'RESULT_NOT_FOUND', 'COMMAND_FAILED', 'TIMEOUT', 'SESSION_ERROR', 'CORE_UNREACHABLE'].includes(String(item.code || ''))).slice(0, 8);
+  const secondaryItems = !focusItems.length ? items.filter(item => item.code === 'ALREADY_EXISTS').slice(0, 6) : [];
+  const rows = (focusItems.length ? focusItems : secondaryItems).map(item => {
+    return `<tr><td>${esc(item.name || ('#' + (item.id || '')) || '—')}</td><td>${esc(item.size || '—')}</td><td>${esc(String(item.sources ?? '—'))}</td><td>${esc(item.code || '—')}</td><td>${esc(item.message || '—')}</td></tr>`;
+  }).join('');
+  const table = rows ? `<div class="label" style="margin:10px 0 6px">Détails utiles</div><table><thead><tr><th>Résultat</th><th>Taille</th><th>Sources</th><th>Code</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table>` : '';
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+      <div style="font-weight:700">Dernier téléchargement ${esc(action || resp.action || 'résultats')}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="openDownloadsTab()">Voir transferts</button>
+        <button class="btn btn-ghost btn-sm" onclick="renderSearchDownloadReport(null)">Masquer</button>
+      </div>
+    </div>
+    <div style="font-size:.84em;color:var(--text2);margin-top:6px">${esc(resp.message || '')}</div>
+    <div class="detail-grid" style="margin-top:10px">${chips.join('')}</div>
+    ${table}
+  `;
+}
+
 function downloadMatchesFilter(dl, statusFilter) {
   const status = String(dl?.status || '').toLowerCase();
   const waitingStates = new Set(['waiting', 'getting sources', 'connecting', 'queued', 'allocating']);
@@ -1649,22 +1711,33 @@ function toggleSelectVisibleResults(checked) {
 
 async function bulkDownloadSelected(btn = null) {
   if (!ensureWritable('Le téléchargement en lot')) return;
-  const ids = Array.from(window._selectedResultIds || []);
+  const ids = Array.from(window._selectedResultIds || []).map(v => Number(v)).filter(v => Number.isFinite(v) && v > 0);
   if (!ids.length) {
     showToast('err', 'Aucun résultat sélectionné');
     return;
   }
   setButtonPending(btn, true, 'Téléchargements...');
-  let added = 0, already = 0, failed = 0;
-  for (const id of ids) {
-    const d = await downloadResult(id, null, true);
-    if (d?.ok && d.code === 'SUCCESS') added += 1;
-    else if (d?.code === 'ALREADY_EXISTS') already += 1;
-    else failed += 1;
-  }
+  const d = await api('/api/search_results/bulk_download', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids}),
+  });
   setButtonPending(btn, false);
-  showToast(failed ? 'err' : 'ok', `Sélection: ${added} ajouté(s), ${already} déjà présent(s), ${failed} échec(s)`);
-  await loadDownloads();
+  renderSearchDownloadReport(d, 'lot résultats');
+  if (d?.ok) {
+    showToast(d.code === 'PARTIAL_SUCCESS' ? 'info' : 'ok', getActionMessage(d, 'Téléchargement lot exécuté'));
+    if (Array.isArray(d?.data?.changed_result_ids)) {
+      d.data.changed_result_ids.forEach(id => window._selectedResultIds.delete(Number(id)));
+      applyResultFilters();
+    }
+    await loadDownloads();
+  } else {
+    showToast('err', getActionMessage(d, 'Erreur de téléchargement lot'));
+  }
+  if (getActiveTab() === 'settings') {
+    loadActionHistory();
+    runDebug();
+  }
 }
 
 function openDownloadsTab() {
@@ -1677,8 +1750,13 @@ async function downloadResult(id, btn = null, silent = false) {
   const d = await api('/api/download?id=' + id);
   if (!silent) setButtonPending(btn, false);
   if (!silent) {
+    renderSearchDownloadReport(d, 'résultat');
     if (d && d.ok) {
       showToast('ok', getActionMessage(d, 'Ajout effectué'));
+      if (d.code === 'SUCCESS') {
+        window._selectedResultIds?.delete(Number(id));
+        applyResultFilters();
+      }
       await loadDownloads();
     } else {
       showToast('err', getActionMessage(d, 'Erreur inconnue'));

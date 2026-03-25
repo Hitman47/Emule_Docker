@@ -2,6 +2,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'dashboard' / 'server.py'
@@ -107,6 +108,53 @@ class DashboardRegressionTests(unittest.TestCase):
         payload = server.build_action_history_payload(limit=10)
         self.assertEqual(len(payload['actions']), 1)
         self.assertIn('digest', payload)
+
+    def test_summarize_search_download_results_groups_codes(self):
+        results = [
+            {'id': 1, 'name': 'One', 'size': '700 MB', 'sources': 10, 'code': 'SUCCESS', 'message': 'ok', 'confirmed': True, 'ok': True},
+            {'id': 2, 'name': 'Two', 'size': '700 MB', 'sources': 4, 'code': 'ALREADY_EXISTS', 'message': 'already', 'confirmed': True, 'ok': True},
+            {'id': 3, 'name': 'Three', 'size': '700 MB', 'sources': 2, 'code': 'RESULT_NOT_FOUND', 'message': 'missing', 'confirmed': False, 'ok': False},
+            {'id': 4, 'name': 'Four', 'size': '700 MB', 'sources': 1, 'code': 'STATE_NOT_CONFIRMED', 'message': 'bad', 'confirmed': False, 'ok': False},
+        ]
+        overview = server.summarize_search_download_results(results)
+        self.assertEqual(overview['success'], 1)
+        self.assertEqual(overview['already'], 1)
+        self.assertEqual(overview['missing'], 1)
+        self.assertEqual(overview['failed'], 1)
+        self.assertIn(1, overview['confirmed_ids'])
+        self.assertIn(3, overview['missing_ids'])
+        self.assertIn(4, overview['failed_ids'])
+
+    def test_bulk_download_from_cached_search_summarizes_success_already_and_missing(self):
+        server.set_last_search_context('ubuntu', 'kad', [
+            {'id': 1, 'name': 'Alpha.iso', 'size': '700 MB', 'sources': 20},
+            {'id': 2, 'name': 'Beta.iso', 'size': '800 MB', 'sources': 8},
+        ])
+        before_raw = '> BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB Beta.iso\n  100.0/800.0 MB  12%\n  Sources: 3\n  0.0 KB/s paused\n'
+        after_raw = before_raw + '> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Alpha.iso\n  0.0/700.0 MB  0%\n  Sources: 0\n  0.0 KB/s waiting\n'
+
+        def fake_run_amulecmd(cmd, timeout=20):
+            if cmd == 'show dl':
+                if fake_run_amulecmd.calls == 0:
+                    fake_run_amulecmd.calls += 1
+                    return before_raw
+                return after_raw
+            raise AssertionError(f'unexpected command: {cmd}')
+        fake_run_amulecmd.calls = 0
+
+        with mock.patch.object(server, 'run_amulecmd', side_effect=fake_run_amulecmd), \
+             mock.patch.object(server, 'run_amulecmd_interactive', return_value='OK'), \
+             mock.patch.object(server.time, 'sleep', return_value=None):
+            payload, status = server.bulk_download_from_cached_search([1, 2, 999, 1])
+
+        self.assertEqual(status, 207)
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['code'], 'PARTIAL_SUCCESS')
+        self.assertEqual(payload['data']['summary']['success'], 1)
+        self.assertEqual(payload['data']['summary']['already'], 1)
+        self.assertEqual(payload['data']['summary']['missing'], 1)
+        self.assertEqual(payload['data']['summary']['total'], 3)
+        self.assertIn(1, payload['data']['changed_result_ids'])
 
     def test_import_dashboard_bundle_merge_keeps_uniques(self):
         settings = server.normalize_settings(None)

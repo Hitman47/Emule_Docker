@@ -330,6 +330,64 @@ def compact_transfer_result(item):
     return payload
 
 
+def compact_search_download_result(item):
+    if not isinstance(item, dict):
+        return {}
+    payload = {
+        "id": int(item.get("id", 0) or 0),
+        "name": item.get("name", ""),
+        "size": item.get("size", ""),
+        "sources": int(item.get("sources", 0) or 0),
+        "code": item.get("code", "UNKNOWN"),
+        "message": item.get("message", ""),
+        "hash": item.get("hash", ""),
+        "confirmed": bool(item.get("confirmed")),
+        "ok": bool(item.get("ok")),
+    }
+    return payload
+
+
+def summarize_search_download_results(results):
+    overview = {
+        "total": 0,
+        "success": 0,
+        "already": 0,
+        "failed": 0,
+        "missing": 0,
+        "counts_by_code": {},
+        "confirmed_ids": [],
+        "failed_ids": [],
+        "missing_ids": [],
+        "success_items": [],
+        "already_items": [],
+        "failed_items": [],
+    }
+    for item in results or []:
+        compact = compact_search_download_result(item)
+        code = compact.get("code", "UNKNOWN") or "UNKNOWN"
+        overview["total"] += 1
+        overview["counts_by_code"][code] = overview["counts_by_code"].get(code, 0) + 1
+        if code == "SUCCESS":
+            overview["success"] += 1
+            if compact.get("id"):
+                overview["confirmed_ids"].append(compact.get("id"))
+            overview["success_items"].append(compact)
+        elif code == "ALREADY_EXISTS":
+            overview["already"] += 1
+            overview["already_items"].append(compact)
+        elif code == "RESULT_NOT_FOUND":
+            overview["missing"] += 1
+            if compact.get("id"):
+                overview["missing_ids"].append(compact.get("id"))
+            overview["failed_items"].append(compact)
+        else:
+            overview["failed"] += 1
+            if compact.get("id"):
+                overview["failed_ids"].append(compact.get("id"))
+            overview["failed_items"].append(compact)
+    return overview
+
+
 
 def summarize_transfer_action_results(results):
     overview = {
@@ -1767,6 +1825,158 @@ def download_from_cached_search(result_id):
     return action_response("download", False, "STATE_NOT_CONFIRMED", normalize_action_error("download", "STATE_NOT_CONFIRMED"), status=502, data={"output": interactive_output})
 
 
+def bulk_download_from_cached_search(result_ids):
+    ctx = _last_search_context.copy()
+    if not ctx.get("query"):
+        return action_response("bulk_download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
+    if ctx.get("timestamp") and time.time() - ctx.get("timestamp", 0) > 15 * 60:
+        return action_response("bulk_download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
+    if not isinstance(result_ids, list):
+        return action_response("bulk_download", False, "INVALID_INPUT", "Aucun identifiant de résultat valide fourni.", status=400)
+
+    normalized_ids = []
+    seen_ids = set()
+    for raw_id in result_ids:
+        try:
+            value = int(raw_id)
+        except Exception:
+            continue
+        if value <= 0 or value in seen_ids:
+            continue
+        seen_ids.add(value)
+        normalized_ids.append(value)
+    if not normalized_ids:
+        return action_response("bulk_download", False, "INVALID_INPUT", "Aucun identifiant de résultat valide fourni.", status=400)
+
+    result_map = {}
+    for row in ctx.get("results", []) or []:
+        try:
+            row_id = int(row.get("id", -1))
+        except Exception:
+            continue
+        result_map.setdefault(row_id, row)
+
+    current_downloads = parse_downloads(run_amulecmd("show dl"))
+    results = []
+    attempt_ids = []
+    attempt_rows = []
+    for rid in normalized_ids:
+        matched = result_map.get(rid)
+        if not matched:
+            results.append({
+                "id": rid,
+                "name": "",
+                "size": "",
+                "sources": 0,
+                "code": "RESULT_NOT_FOUND",
+                "message": normalize_action_error("download", "RESULT_NOT_FOUND"),
+                "confirmed": False,
+                "ok": False,
+            })
+            continue
+        size_bytes = size_to_bytes(matched.get("size", ""))
+        existing = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_bytes, downloads=current_downloads)
+        if existing:
+            results.append({
+                "id": rid,
+                "name": matched.get("name", ""),
+                "size": matched.get("size", ""),
+                "sources": int(matched.get("sources", 0) or 0),
+                "hash": existing.get("hash", ""),
+                "code": "ALREADY_EXISTS",
+                "message": normalize_action_error("download", "ALREADY_EXISTS"),
+                "confirmed": True,
+                "ok": True,
+            })
+            continue
+        attempt_ids.append(rid)
+        attempt_rows.append(matched)
+
+    interactive_output = ""
+    err = None
+    if attempt_ids:
+        commands = [f"search {ctx.get('type', 'kad')} {ctx.get('query', '')}", ("sleep", 3.5), "results", ("sleep", 0.3)]
+        commands.extend([f"download {rid}" for rid in attempt_ids])
+        interactive_output = run_amulecmd_interactive(commands, timeout=max(30, 20 + len(attempt_ids) * 2))
+        err = classify_amule_error(interactive_output)
+        time.sleep(0.7)
+
+    refreshed = parse_downloads(run_amulecmd("show dl"))
+    for matched, rid in zip(attempt_rows, attempt_ids):
+        created = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=refreshed)
+        if created:
+            results.append({
+                "id": rid,
+                "name": matched.get("name", ""),
+                "size": matched.get("size", ""),
+                "sources": int(matched.get("sources", 0) or 0),
+                "hash": created.get("hash", ""),
+                "code": "SUCCESS",
+                "message": "Téléchargement confirmé dans les transferts.",
+                "confirmed": True,
+                "ok": True,
+            })
+        else:
+            failure_code = err or "STATE_NOT_CONFIRMED"
+            results.append({
+                "id": rid,
+                "name": matched.get("name", ""),
+                "size": matched.get("size", ""),
+                "sources": int(matched.get("sources", 0) or 0),
+                "code": failure_code,
+                "message": normalize_action_error("download", failure_code, interactive_output),
+                "confirmed": False,
+                "ok": False,
+            })
+
+    ordered = []
+    by_id = {}
+    for item in results:
+        by_id.setdefault(item.get("id"), []).append(item)
+    for rid in normalized_ids:
+        ordered.extend(by_id.get(rid, []))
+
+    overview = summarize_search_download_results(ordered)
+    success = overview["success"]
+    already = overview["already"]
+    missing = overview["missing"]
+    failed = overview["failed"]
+    if success == len(normalized_ids) and success > 0:
+        code = "SUCCESS"
+        ok = True
+        status = 200
+    elif success > 0 or already > 0:
+        code = "PARTIAL_SUCCESS"
+        ok = True
+        status = 207
+    elif err:
+        code = err
+        ok = False
+        status = 502
+    else:
+        primary_codes = sorted(overview["counts_by_code"].items(), key=lambda kv: kv[1], reverse=True)
+        code = primary_codes[0][0] if primary_codes else "STATE_NOT_CONFIRMED"
+        ok = False
+        status = 409 if code in ("ALREADY_EXISTS", "RESULT_NOT_FOUND") else 502
+    message = f"Téléchargements lot: {success} confirmé(s), {already} déjà présent(s), {missing} introuvable(s), {failed} échec(s)."
+    if success:
+        cache_clear("downloads")
+    return action_response("bulk_download", ok, code, message, confirmed=(success + already == len(normalized_ids) and missing == 0 and failed == 0), status=status, data={
+        "summary": {
+            "total": len(normalized_ids),
+            "success": success,
+            "already": already,
+            "failed": failed,
+            "missing": missing,
+        },
+        "overview": overview,
+        "results": ordered[:300],
+        "requested_ids": normalized_ids,
+        "changed_result_ids": overview["confirmed_ids"],
+        "output": interactive_output if err else "",
+    })
+
+
 def add_ed2k_confirmed(link):
     link = (link or "").strip()
     if not link.startswith("ed2k://"):
@@ -2606,6 +2816,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/action_history/clear":
             clear_action_history_store()
             self.send_json({"ok": True, "message": "Historique des actions vidé."})
+            return
+
+        if parsed.path == "/api/search_results/bulk_download":
+            blocked = guard_write_action(self, "download")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            ids = data.get("ids") if isinstance(data.get("ids"), list) else []
+            payload, status = execute_locked_action("download", lambda: bulk_download_from_cached_search(ids))
+            self.send_json(payload, status)
             return
 
         if parsed.path == "/api/transfers/bulk_action":
