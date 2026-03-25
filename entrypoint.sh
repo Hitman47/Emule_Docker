@@ -41,7 +41,7 @@ add_cron_job() {
     schedule="$1"
     name="$2"
     command="$3"
-    printf "%s root %s # %s\n" "$schedule" "$command" "$name" >> "$CRON_FILE"
+    printf "%s root . /etc/environment; %s # %s\n" "$schedule" "$command" "$name" >> "$CRON_FILE"
     CRON_HAS_JOBS=1
 }
 
@@ -129,6 +129,53 @@ mod_backup() {
     fi
 }
 
+# ═══════════════════════════════════════════
+# NEW: Kad health monitor — reconnects Kad if it drops
+# ═══════════════════════════════════════════
+mod_kad_monitor() {
+    printf "[MOD] Kad monitor activé (toutes les 15 min)\n"
+    add_cron_job "*/15 * * * *" "kad-monitor" "/opt/scripts/kad-monitor.sh >> /var/log/kad-monitor.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
+# NEW: Periodic server source scanner (every 24h)
+# ═══════════════════════════════════════════
+mod_source_scanner() {
+    printf "[MOD] Server source scanner activé (toutes les 24h)\n"
+    add_cron_job "0 */24 * * *" "source-scanner" "/opt/scripts/source-scanner.sh >> /var/log/source-scanner.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
+# NEW: Init persistent settings file
+# ═══════════════════════════════════════════
+init_settings() {
+    SETTINGS_FILE="${AMULE_HOME}/dashboard-settings.json"
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        cat > "$SETTINGS_FILE" << 'SETTINGS_EOF'
+{
+  "server_sources": [
+    {"key":"official","label":"eMule Security (officiel)","kind":"serverlist","url":"http://upd.emule-security.org/server.met","priority":300,"enabled":true},
+    {"key":"peerates","label":"Peerates","kind":"serverlist","url":"http://edk.peerates.net/servers/best/server.met","priority":200,"enabled":true},
+    {"key":"flyernet","label":"FlyerNet","kind":"html","url":"http://flyernet.fr.st.free.fr/ip_serveurs.php","priority":100,"enabled":true}
+  ],
+  "nodes_sources": [
+    {"key":"emule-security","url":"http://upd.emule-security.org/nodes.dat","enabled":true}
+  ],
+  "ipfilter_url": "http://upd.emule-security.org/ipfilter.zip",
+  "scan_interval_hours": 24,
+  "kad_auto_reconnect": true,
+  "auto_organize_enabled": true,
+  "last_scan": null
+}
+SETTINGS_EOF
+        chown "${AMULE_UID}:${AMULE_GID}" "$SETTINGS_FILE"
+        printf "[SETTINGS] Fichier de paramètres initialisé\n"
+    else
+        printf "[SETTINGS] Fichier de paramètres existant\n"
+    fi
+    export SETTINGS_FILE
+}
+
 start_dashboard() {
     DASHBOARD_ENABLED=${DASHBOARD_ENABLED:-"false"}
     DASHBOARD_PORT=${DASHBOARD_PORT:-8078}
@@ -142,10 +189,20 @@ start_dashboard() {
         export AMULE_EC_PASSWORD="${AMULE_GUI_PWD}"
         export DASHBOARD_PORT
         export DASHBOARD_PWD="${DASHBOARD_PWD:-${WEBUI_PWD:-admin}}"
+        export SETTINGS_FILE="${AMULE_HOME}/dashboard-settings.json"
         python3 /opt/dashboard/server.py &
         DASHBOARD_PID=$!
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
     fi
+    # Export EC credentials for cron scripts too
+    {
+        printf 'AMULE_EC_HOST=127.0.0.1\n'
+        printf 'AMULE_EC_PORT=4712\n'
+        printf 'AMULE_EC_PASSWORD=%s\n' "${AMULE_GUI_PWD}"
+        printf 'AMULE_HOME=%s\n' "${AMULE_HOME}"
+        printf 'INCOMING_DIR=%s\n' "${AMULE_INCOMING}"
+        printf 'SETTINGS_FILE=%s\n' "${AMULE_HOME}/dashboard-settings.json"
+    } > /etc/environment
 }
 
 AMULE_GROUP="amule"
@@ -389,12 +446,18 @@ else
     printf "[CONFIG] remote.conf existant\n"
 fi
 
+# Replace passwords using awk to target the correct sections
 if [ -n "${GUI_PWD:-}" ]; then
     sed -i "s/^ECPassword=.*/ECPassword=${AMULE_GUI_ENCODED_PWD}/" "$AMULE_CONF"
+    # In remote.conf [EC] section
     sed -i "s/^Password=.*/Password=${AMULE_GUI_ENCODED_PWD}/" "$REMOTE_CONF"
 fi
 if [ -n "${WEBUI_PWD:-}" ]; then
-    sed -i "s|^Password=.*|Password=${AMULE_WEBUI_ENCODED_PWD}|" "$AMULE_CONF"
+    # Only replace Password= inside [WebServer] section of amule.conf
+    awk -v pwd="${AMULE_WEBUI_ENCODED_PWD}" '
+        /^\[WebServer\]/{s=1} /^\[/{if(!/^\[WebServer\]/)s=0}
+        s && /^Password=/{$0="Password="pwd} {print}
+    ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
     sed -i "s|^AdminPassword=.*|AdminPassword=${AMULE_WEBUI_ENCODED_PWD}|" "$REMOTE_CONF"
 fi
 
@@ -410,6 +473,9 @@ mod_fix_kad_bootstrap
 mod_file_organizer
 mod_server_update
 mod_backup
+mod_kad_monitor
+mod_source_scanner
+init_settings
 
 if [ "$CRON_HAS_JOBS" -eq 1 ]; then
     chmod 0644 "$CRON_FILE"

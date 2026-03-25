@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>aMule Dashboard — ZimaBoard</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icons/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#6366f1">
 <style>
 /* ── Reset & Base ── */
 *{margin:0;padding:0;box-sizing:border-box}
@@ -148,6 +153,7 @@ tr:hover{background:var(--bg3)}
     <div class="tab" data-tab="downloads">⬇️ Transferts</div>
     <div class="tab" data-tab="servers">🌐 Serveurs</div>
     <div class="tab" data-tab="files">📁 Fichiers</div>
+    <div class="tab" data-tab="settings">⚙️ Paramètres</div>
   </div>
 
   <!-- ══════════════════════════════════════════ -->
@@ -314,6 +320,78 @@ tr:hover{background:var(--bg3)}
       <div class="loading"><div class="spinner"></div></div>
     </div>
   </div>
+
+  <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Settings                              -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel" id="panel-settings">
+
+    <!-- Kad Health -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🟢 État Kad & ED2K</div>
+      <div id="kadStatusDetail" style="font-size:.88em;color:var(--text2);margin-bottom:10px">Chargement...</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="kadReconnect()">🔌 Reconnecter Kad + ED2K</button>
+        <button class="btn btn-ghost btn-sm" onclick="kadStatus()">🔄 Vérifier</button>
+      </div>
+      <p style="font-size:.78em;color:var(--text3);margin-top:8px">Un monitor automatique vérifie Kad toutes les 15 min et reconnecte si nécessaire.</p>
+    </div>
+
+    <!-- Server Sources Management -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">📡 Sources de serveurs ED2K</div>
+      <p style="color:var(--text2);font-size:.85em;line-height:1.5;margin-bottom:12px">
+        Ces sources sont scannées automatiquement <strong>toutes les 24h</strong> pour maintenir une liste de serveurs à jour.
+        Priorité : eMule Security (officiel) &gt; Peerates &gt; FlyerNet. Tu peux ajouter tes propres sources.
+      </p>
+      <div id="settingsSourcesList" style="margin-bottom:12px"></div>
+
+      <!-- Add new source -->
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+        <div class="label" style="margin-bottom:8px">➕ Ajouter une source</div>
+        <div style="display:grid;grid-template-columns:1fr 120px;gap:8px;margin-bottom:8px">
+          <input type="text" id="newSourceUrl" placeholder="http://example.com/server.met"
+            style="padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none">
+          <select id="newSourceKind" style="padding:8px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none">
+            <option value="serverlist">server.met</option>
+            <option value="html">Page HTML</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px">
+          <input type="text" id="newSourceLabel" placeholder="Nom de la source (optionnel)"
+            style="padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none">
+          <button class="btn btn-primary btn-sm" onclick="addSource()">Ajouter</button>
+        </div>
+      </div>
+      <div id="settingsMsg" class="msg" style="margin-top:8px"></div>
+    </div>
+
+    <!-- Scan Controls -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🔄 Scanner les sources</div>
+      <p style="color:var(--text2);font-size:.85em;margin-bottom:10px">
+        Lance un scan immédiat de toutes les sources activées. Met à jour server.met, nodes.dat et l'IP filter.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-primary btn-sm" onclick="scanNow()">🚀 Scanner maintenant</button>
+        <button class="btn btn-ghost btn-sm" onclick="importServerSources(['official','peerates','flyernet'])">📥 Importer les 3 sources</button>
+        <span id="lastScanInfo" style="font-size:.78em;color:var(--text3)"></span>
+      </div>
+    </div>
+
+    <!-- Logs viewer -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">📋 Logs</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-ghost btn-sm" onclick="showLog('kad-monitor')">Kad Monitor</button>
+        <button class="btn btn-ghost btn-sm" onclick="showLog('source-scanner')">Source Scanner</button>
+        <button class="btn btn-ghost btn-sm" onclick="showLog('server-update')">MAJ Serveurs</button>
+        <button class="btn btn-ghost btn-sm" onclick="showLog('file-organizer')">Organiseur</button>
+        <button class="btn btn-ghost btn-sm" onclick="showLog('backup')">Backup</button>
+      </div>
+      <pre id="logViewer" style="font-size:.75em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:250px;overflow:auto;white-space:pre-wrap;word-break:break-all">Sélectionne un log ci-dessus</pre>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -336,6 +414,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'downloads') loadDownloads();
     if (t.dataset.tab === 'servers') loadServers();
     if (t.dataset.tab === 'files') loadFiles();
+    if (t.dataset.tab === 'settings') loadSettings();
   });
 });
 
@@ -650,6 +729,141 @@ function filterFilesByName(val) {
 function esc(s) {
   if (!s) return '';
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Settings ──
+let currentSettings = null;
+
+async function loadSettings() {
+  const d = await api('/api/settings');
+  if (!d || !d.settings) return;
+  currentSettings = d.settings;
+  renderSourcesList(currentSettings.server_sources || []);
+  // Last scan info
+  const lastScan = currentSettings.last_scan;
+  const el = document.getElementById('lastScanInfo');
+  if (lastScan) {
+    const dt = new Date(lastScan);
+    el.textContent = 'Dernier scan : ' + dt.toLocaleString('fr-FR');
+  } else {
+    el.textContent = 'Aucun scan effectué';
+  }
+  kadStatus();
+}
+
+function renderSourcesList(sources) {
+  const container = document.getElementById('settingsSourcesList');
+  if (!sources.length) {
+    container.innerHTML = '<div class="empty" style="padding:12px">Aucune source configurée</div>';
+    return;
+  }
+  // Sort by priority desc
+  sources.sort((a,b) => (b.priority||0) - (a.priority||0));
+  container.innerHTML = sources.map(src => {
+    const enabled = src.enabled !== false;
+    const kindBadge = src.kind === 'html' ? '🌐 HTML' : '📄 .met';
+    const opacity = enabled ? '1' : '.5';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg3);border-radius:8px;margin-bottom:6px;opacity:${opacity}">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:.9em;font-weight:600">${esc(src.label || src.key)}</div>
+        <div style="font-size:.75em;color:var(--text3);word-break:break-all">${esc(src.url)}</div>
+        <div style="font-size:.72em;color:var(--text3);margin-top:2px">${kindBadge} · Priorité ${src.priority || 0}${src.description ? ' · ' + esc(src.description) : ''}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="toggleSource('${esc(src.key)}')" title="${enabled ? 'Désactiver' : 'Activer'}">${enabled ? '✅' : '⬜'}</button>
+      <button class="btn btn-red btn-sm" onclick="removeSource('${esc(src.key)}','${esc(src.url)}')" title="Supprimer">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function toggleSource(key) {
+  const r = await fetch('/api/settings/toggle_source', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({key})
+  });
+  const d = await r.json();
+  if (d.ok) loadSettings();
+  else showToast('err', d.error || 'Erreur');
+}
+
+async function removeSource(key, url) {
+  if (!confirm('Supprimer cette source ?')) return;
+  const r = await fetch('/api/settings/remove_source', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({key, url})
+  });
+  const d = await r.json();
+  if (d.ok) { showToast('ok', 'Source supprimée'); loadSettings(); }
+  else showToast('err', d.error || 'Erreur');
+}
+
+async function addSource() {
+  const url = document.getElementById('newSourceUrl').value.trim();
+  const kind = document.getElementById('newSourceKind').value;
+  const label = document.getElementById('newSourceLabel').value.trim();
+  const msg = document.getElementById('settingsMsg');
+
+  if (!url || !url.startsWith('http')) {
+    msg.className = 'msg err show'; msg.textContent = 'URL invalide';
+    setTimeout(() => msg.classList.remove('show'), 3000);
+    return;
+  }
+
+  const r = await fetch('/api/settings/add_source', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({url, kind, label: label || url, priority: 50})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    msg.className = 'msg ok show'; msg.textContent = 'Source ajoutée !';
+    document.getElementById('newSourceUrl').value = '';
+    document.getElementById('newSourceLabel').value = '';
+    loadSettings();
+  } else {
+    msg.className = 'msg err show'; msg.textContent = d.error || 'Erreur';
+  }
+  setTimeout(() => msg.classList.remove('show'), 3000);
+}
+
+// ── Kad Status ──
+async function kadStatus() {
+  const d = await api('/api/kad/status');
+  const el = document.getElementById('kadStatusDetail');
+  if (!d) { el.textContent = 'Impossible de vérifier'; return; }
+  const kadIcon = d.kad_connected ? '🟢' : '🔴';
+  const ed2kIcon = d.ed2k_connected ? '🟢' : '🔴';
+  el.innerHTML = `${kadIcon} <strong>Kad</strong>: ${d.kad_connected ? 'Connecté' : 'Déconnecté'} &nbsp;&nbsp; ${ed2kIcon} <strong>ED2K</strong>: ${d.ed2k_connected ? 'Connecté' : 'Déconnecté'}`;
+}
+
+async function kadReconnect() {
+  showToast('info', 'Reconnexion en cours...');
+  const d = await api('/api/kad/reconnect');
+  if (d && d.ok) {
+    showToast('ok', 'Commande de reconnexion envoyée');
+    setTimeout(kadStatus, 5000);
+  } else {
+    showToast('err', 'Erreur');
+  }
+}
+
+// ── Scan Now ──
+async function scanNow() {
+  showToast('info', 'Scan des sources lancé (quelques secondes)...');
+  const d = await api('/api/scan_now');
+  if (d && d.ok) showToast('ok', d.message || 'Scan lancé');
+  else showToast('err', 'Erreur');
+}
+
+// ── Logs ──
+async function showLog(name) {
+  const viewer = document.getElementById('logViewer');
+  viewer.textContent = 'Chargement...';
+  const d = await api('/api/logs?name=' + name);
+  if (d && d.lines) {
+    viewer.textContent = d.lines.join('') || '(vide)';
+    viewer.scrollTop = viewer.scrollHeight;
+  } else {
+    viewer.textContent = '(erreur ou log introuvable)';
+  }
 }
 
 // ── Init & Auto-refresh ──

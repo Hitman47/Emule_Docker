@@ -29,8 +29,11 @@ INCOMING_DIR = os.environ.get("INCOMING_DIR", "/incoming")
 TEMP_DIR = os.environ.get("TEMP_DIR", "/temp")
 
 STATIC_DIR = Path(__file__).parent / "static"
+AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
+SETTINGS_FILE = os.environ.get("SETTINGS_FILE", os.path.join(AMULE_HOME, "dashboard-settings.json"))
 
-SERVER_SOURCES = {
+# Default server sources (also initialized in entrypoint.sh)
+DEFAULT_SERVER_SOURCES = {
     "official": {
         "key": "official",
         "label": "eMule Security (officiel)",
@@ -56,6 +59,41 @@ SERVER_SOURCES = {
         "description": "Page HTML d'IP/ports à parser.",
     },
 }
+
+
+def load_settings():
+    """Load persistent settings from JSON file."""
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_settings(settings):
+    """Save settings to JSON file."""
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
+def get_server_sources_from_settings():
+    """Build SERVER_SOURCES dict from settings file, falling back to defaults."""
+    settings = load_settings()
+    if settings and "server_sources" in settings:
+        sources = {}
+        for src in settings["server_sources"]:
+            key = src.get("key", src.get("url", ""))
+            sources[key] = src
+        return sources
+    return dict(DEFAULT_SERVER_SOURCES)
+
+
+# Active server sources (refreshed from settings)
+SERVER_SOURCES = get_server_sources_from_settings()
 
 # ── Simple session auth ──
 AUTH_TOKEN = hashlib.sha256(DASHBOARD_PWD.encode()).hexdigest()[:32]
@@ -536,13 +574,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/organize":
             try:
-                subprocess.run(["/home/amule/scripts/file-organizer.sh"], capture_output=True, timeout=30)
+                subprocess.run(["/opt/scripts/file-organizer.sh"], capture_output=True, timeout=30)
+                cache_clear("files")
                 self.send_json({"ok": True})
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
 
+        elif path == "/api/settings":
+            settings = load_settings()
+            if settings:
+                self.send_json({"ok": True, "settings": settings})
+            else:
+                self.send_json({"ok": False, "error": "Fichier settings introuvable"}, 404)
+
+        elif path == "/api/kad/status":
+            raw = run_amulecmd("status")
+            kad_ok = bool(re.search(r'kad.*(running|connected|firewalled)', raw, re.I))
+            ed2k_ok = bool(re.search(r'ed2k.*connected', raw, re.I)) and not bool(re.search(r'ed2k.*not connected', raw, re.I))
+            self.send_json({"kad_connected": kad_ok, "ed2k_connected": ed2k_ok, "raw": raw})
+
+        elif path == "/api/kad/reconnect":
+            out1 = run_amulecmd("connect kad")
+            out2 = run_amulecmd("connect ed2k")
+            cache_clear("status")
+            self.send_json({"ok": True, "output": out1 + "\n" + out2})
+
+        elif path == "/api/scan_now":
+            # Trigger an immediate source scan
+            def do_scan():
+                try:
+                    subprocess.run(["/opt/scripts/source-scanner.sh"], capture_output=True, timeout=120)
+                except Exception:
+                    pass
+                cache_clear("status", "servers")
+            threading.Thread(target=do_scan, daemon=True).start()
+            self.send_json({"ok": True, "message": "Scan lancé en arrière-plan"})
+
+        elif path == "/api/logs":
+            log_name = qs.get("name", [""])[0]
+            valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
+                          "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
+                          "backup": "/var/log/backup.log"}
+            if log_name in valid_logs:
+                try:
+                    with open(valid_logs[log_name], "r") as f:
+                        lines = f.readlines()
+                    self.send_json({"ok": True, "lines": lines[-100:]})
+                except FileNotFoundError:
+                    self.send_json({"ok": True, "lines": ["(aucun log encore)"]})
+            else:
+                self.send_json({"error": "Log inconnu"}, 400)
+
         elif path == "/" or path == "/index.html":
             self.serve_file(STATIC_DIR / "index.html", "text/html")
+
+        elif path == "/manifest.json":
+            self.serve_file(STATIC_DIR / "manifest.json", "application/json")
+
+        elif path.startswith("/icons/"):
+            fname = path.split("/")[-1]
+            safe = re.sub(r'[^a-zA-Z0-9._-]', '', fname)
+            fpath = STATIC_DIR / "icons" / safe
+            ctype = "image/png"
+            if safe.endswith(".ico"): ctype = "image/x-icon"
+            self.serve_file(fpath, ctype)
 
         else:
             self.send_response(404); self.end_headers()
@@ -576,6 +671,85 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = import_server_sources(sources, reconnect=reconnect)
             status = 200 if result.get("ok") else 502
             self.send_json(result, status)
+
+        elif parsed.path == "/api/settings":
+            # Save settings
+            global SERVER_SOURCES
+            new_settings = data
+            if save_settings(new_settings):
+                SERVER_SOURCES = get_server_sources_from_settings()
+                self.send_json({"ok": True})
+            else:
+                self.send_json({"error": "Impossible de sauvegarder"}, 500)
+
+        elif parsed.path == "/api/settings/add_source":
+            # Add a new server source
+            settings = load_settings()
+            if not settings:
+                self.send_json({"error": "Settings introuvable"}, 500)
+                return
+            new_src = {
+                "key": data.get("key", f"custom_{int(time.time())}"),
+                "label": data.get("label", data.get("url", "Custom")),
+                "kind": data.get("kind", "serverlist"),
+                "url": data.get("url", ""),
+                "priority": int(data.get("priority", 50)),
+                "enabled": True,
+                "description": data.get("description", "Source ajoutée manuellement"),
+            }
+            if not new_src["url"]:
+                self.send_json({"error": "URL requise"}, 400)
+                return
+            if "server_sources" not in settings:
+                settings["server_sources"] = []
+            # Check duplicate
+            existing_urls = [s.get("url") for s in settings["server_sources"]]
+            if new_src["url"] in existing_urls:
+                self.send_json({"error": "Source déjà existante"}, 409)
+                return
+            settings["server_sources"].append(new_src)
+            if save_settings(settings):
+                SERVER_SOURCES = get_server_sources_from_settings()
+                self.send_json({"ok": True, "source": new_src})
+            else:
+                self.send_json({"error": "Erreur sauvegarde"}, 500)
+
+        elif parsed.path == "/api/settings/remove_source":
+            settings = load_settings()
+            if not settings:
+                self.send_json({"error": "Settings introuvable"}, 500)
+                return
+            key = data.get("key", "")
+            url = data.get("url", "")
+            before = len(settings.get("server_sources", []))
+            settings["server_sources"] = [
+                s for s in settings.get("server_sources", [])
+                if s.get("key") != key and s.get("url") != url
+            ]
+            after = len(settings["server_sources"])
+            if save_settings(settings):
+                SERVER_SOURCES = get_server_sources_from_settings()
+                self.send_json({"ok": True, "removed": before - after})
+            else:
+                self.send_json({"error": "Erreur sauvegarde"}, 500)
+
+        elif parsed.path == "/api/settings/toggle_source":
+            settings = load_settings()
+            if not settings:
+                self.send_json({"error": "Settings introuvable"}, 500)
+                return
+            key = data.get("key", "")
+            toggled = False
+            for s in settings.get("server_sources", []):
+                if s.get("key") == key:
+                    s["enabled"] = not s.get("enabled", True)
+                    toggled = True
+                    break
+            if toggled and save_settings(settings):
+                SERVER_SOURCES = get_server_sources_from_settings()
+                self.send_json({"ok": True})
+            else:
+                self.send_json({"error": "Source non trouvée"}, 404)
         else:
             self.send_json({"error": "not found"}, 404)
 
