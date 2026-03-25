@@ -146,6 +146,14 @@ mod_source_scanner() {
 }
 
 # ═══════════════════════════════════════════
+# NEW: Stall detector — changes server if no DL progress for 30min
+# ═══════════════════════════════════════════
+mod_stall_detector() {
+    printf "[MOD] Stall detector activé (toutes les 5 min)\n"
+    add_cron_job "*/5 * * * *" "stall-detector" "/opt/scripts/stall-detector.sh >> /var/log/stall-detector.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
 # NEW: Init persistent settings file
 # ═══════════════════════════════════════════
 init_settings() {
@@ -564,6 +572,7 @@ mod_server_update
 mod_backup
 mod_kad_monitor
 mod_source_scanner
+mod_stall_detector
 init_settings
 
 if [ "$CRON_HAS_JOBS" -eq 1 ]; then

@@ -1144,7 +1144,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log_name = qs.get("name", [""])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
-                          "backup": "/var/log/backup.log"}
+                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log"}
             if log_name in valid_logs:
                 try:
                     with open(valid_logs[log_name], "r") as f:
