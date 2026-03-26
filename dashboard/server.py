@@ -274,6 +274,55 @@ def rate_limit_retry_after(bucket, key, limit, window=60):
     return 0
 
 
+def is_read_only_enabled():
+    return bool(get_dashboard_config().get("read_only", False))
+
+
+def guard_write_action(handler, action):
+    """Block write endpoints when read-only is enabled or the write rate limit is hit.
+
+    Returns None when the action is allowed, otherwise a ``(payload, status)`` tuple
+    ready to be passed to ``send_json``.
+    """
+    action = str(action or "write").strip() or "write"
+
+    if is_read_only_enabled():
+        payload = {
+            "ok": False,
+            "action": action,
+            "confirmed": False,
+            "code": "READ_ONLY",
+            "message": "Mode lecture seule activé. Action d'écriture refusée.",
+            "data": {},
+        }
+        status = 403
+        record_action_event(payload, status)
+        return payload, status
+
+    cfg = get_dashboard_config()
+    retry_after = rate_limit_retry_after(
+        "write",
+        get_client_ip(handler),
+        cfg.get("write_rate_limit_per_minute", DEFAULT_DASHBOARD_CONFIG["write_rate_limit_per_minute"]),
+        60,
+    )
+    if retry_after:
+        payload = {
+            "ok": False,
+            "action": action,
+            "confirmed": False,
+            "code": "RATE_LIMITED",
+            "message": f"Trop d'actions d'écriture. Réessaie dans {retry_after}s.",
+            "retry_after": retry_after,
+            "data": {},
+        }
+        status = 429
+        record_action_event(payload, status)
+        return payload, status
+
+    return None
+
+
 def sync_action_history_limit(config=None):
     cfg = normalize_dashboard_config(config or get_dashboard_config())
     limit = int(cfg.get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"]))
@@ -1956,6 +2005,8 @@ def normalize_action_error(action, code, detail=""):
         "STATE_NOT_CONFIRMED": "Action non confirmée par aMule.",
         "TIMEOUT": "aMule a mis trop de temps à répondre.",
         "LOCKED": "Une action de même type est déjà en cours.",
+        "READ_ONLY": "Mode lecture seule activé.",
+        "RATE_LIMITED": "Trop d'actions d'écriture en peu de temps.",
     }
     msg = messages.get(code, "Erreur inconnue.")
     if detail and code not in ("ALREADY_EXISTS", "LOCKED"):
@@ -2043,7 +2094,8 @@ def check_duplicate_downloads(*, name=None, hash_value=None, size_bytes=None, do
 
 
 def acquire_action_lock(action):
-    lock = _action_locks[action]
+    action = str(action or "").strip() or "unknown"
+    lock = _action_locks.setdefault(action, threading.Lock())
     if not lock.acquire(blocking=False):
         return None
     return lock
