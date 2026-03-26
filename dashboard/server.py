@@ -860,26 +860,74 @@ def parse_status(raw):
     return info
 
 
+def parse_number_loose(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(str(value).strip().replace(',', '.'))
+    except Exception:
+        return default
+
+
+def speed_to_kb(value_text, unit_text):
+    value = parse_number_loose(value_text, 0.0)
+    unit = str(unit_text or '').strip().lower()
+    if unit in ('bytes', 'byte', 'b'):
+        return round(value / 1024, 2)
+    if unit.startswith('m'):
+        return round(value * 1024, 2)
+    if unit.startswith('g'):
+        return round(value * 1024 * 1024, 2)
+    return round(value, 2)
+
+
+def classify_download_status(attr):
+    low = str(attr or '').lower()
+    status_detail = ''
+    if any(token in low for token in ('insufficient disk space', 'not enough free space', 'disk full', 'insufficient space', 'io error', 'corrupt')):
+        return 'error', attr.strip()
+    if 'waiting for hash' in low or 'waiting for completion' in low:
+        return 'waiting', attr.strip()
+    if 'getting sources' in low:
+        return 'getting sources', attr.strip()
+    if 'connecting' in low:
+        return 'connecting', attr.strip()
+    if 'allocating' in low:
+        return 'allocating', attr.strip()
+    if 'hashing' in low:
+        return 'hashing', attr.strip()
+    if 'completing' in low:
+        return 'completing', attr.strip()
+    if re.search(r'\bcomplete\b', low):
+        return 'complete', attr.strip()
+    if 'paused' in low or 'stopped' in low:
+        return 'paused' if 'paused' in low else 'stopped', attr.strip()
+    if 'waiting' in low or 'queued' in low:
+        return 'waiting' if 'waiting' in low else 'queued', attr.strip()
+    if 'error' in low or 'failed' in low:
+        return 'error', attr.strip()
+    if 'downloading' in low or '/s' in low:
+        return 'downloading', attr.strip()
+    return None, status_detail
+
+
 def parse_downloads(raw):
     """Parse amulecmd 'show dl' output.
-    
-    Debian amulecmd 2.3.3 format:
+
+    Handles the common Debian/Alpine variants plus a few looser forms:
       > HASH Filename
-        subsequent lines with size, progress, sources, speed, status
-    
-    A new download entry is ONLY started by a line matching "> [32-hex-hash] name".
-    All other lines are attributes of the current download.
+      512,0/1024,0 MB  50%
+      1.2 MB/s downloading
+      waiting for hash / insufficient disk space / paused
     """
     downloads = []
     current = None
 
-    for line in raw.split("\n"):
+    for line in str(raw or '').split("\n"):
         stripped = line.strip()
         if not stripped:
             continue
 
-        # ── New download: "> HASH Filename" ──
-        # Match: optional ">", then 32 hex chars, then filename
         m_entry = re.match(r'^>?\s*([0-9A-Fa-f]{32})\s+(.+)', stripped)
         if m_entry:
             if current:
@@ -893,66 +941,51 @@ def parse_downloads(raw):
                 "progress": 0,
                 "speed": 0,
                 "sources": 0,
-                "status": "queued"
+                "status": "queued",
+                "status_detail": "",
             }
             continue
 
-        # ── Attribute lines (everything else goes to current download) ──
         if not current:
             continue
 
-        # Remove leading "> " or ">" from attribute lines
         attr = re.sub(r'^>\s*', '', stripped)
         al = attr.lower()
 
-        # Progress: "28.2%" or "28.2 %"
-        m_pct = re.search(r'([\d.]+)\s*%', attr)
+        m_pct = re.search(r'([\d.,]+)\s*%', attr)
         if m_pct:
-            current["progress"] = float(m_pct.group(1))
+            current["progress"] = parse_number_loose(m_pct.group(1), current["progress"])
 
-        # Size: "34.5/122.3 MB" or "34.5 MB / 122.3 MB" or "Size: 122.3 MB"
-        m_frac = re.search(r'([\d.]+)\s*/\s*([\d.]+)\s*([KMGT]?i?[Bb])', attr)
+        m_frac = re.search(r'([\d.,]+)\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bb])', attr)
         if m_frac:
-            current["size"] = f"{m_frac.group(2)} {m_frac.group(3)}"
-            # Also compute progress if not already set
+            total_value = parse_number_loose(m_frac.group(2))
+            current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
             if current["progress"] == 0:
-                try:
-                    done = float(m_frac.group(1))
-                    total = float(m_frac.group(2))
-                    if total > 0:
-                        current["progress"] = round(done / total * 100, 1)
-                except ValueError:
-                    pass
+                done = parse_number_loose(m_frac.group(1))
+                if done is not None and total_value and total_value > 0:
+                    current["progress"] = round(done / total_value * 100, 1)
         elif not current["size"]:
-            m_size = re.search(r'([\d.]+)\s*([KMGT]i?[Bb])', attr)
+            m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bb])', attr, re.I)
             if m_size:
-                current["size"] = f"{m_size.group(1)} {m_size.group(2)}"
+                current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
 
-        # Sources: "3 source(s)" or "Sources: 3" or "3 src"
         m_src = re.search(r'(\d+)\s*(?:source|src)', al)
         if m_src:
             current["sources"] = int(m_src.group(1))
-        if not m_src:
-            m_src2 = re.search(r'sources?:\s*(\d+)', al)
+        else:
+            m_src2 = re.search(r'sources?\s*:?\s*(\d+)', al)
             if m_src2:
                 current["sources"] = int(m_src2.group(1))
 
-        # Speed
-        m_spd = re.search(r'([\d.]+)\s*[kK][bB]/s', attr)
+        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bb]|bytes?)\s*/s', attr, re.I)
         if m_spd:
-            current["speed"] = float(m_spd.group(1))
-        else:
-            m_spd2 = re.search(r'([\d.]+)\s*[Bb]ytes/s', attr)
-            if m_spd2:
-                current["speed"] = round(float(m_spd2.group(1)) / 1024, 2)
+            current["speed"] = speed_to_kb(m_spd.group(1), m_spd.group(2))
 
-        # Status keywords
-        for st in ["downloading", "paused", "waiting", "completing",
-                    "complete", "hashing", "error", "stopped",
-                    "getting sources", "allocating", "connecting", "queued"]:
-            if st in al:
-                current["status"] = st
-                break
+        status, detail = classify_download_status(attr)
+        if status:
+            current["status"] = status
+            if detail:
+                current["status_detail"] = detail
 
     if current:
         downloads.append(current)
@@ -967,7 +1000,7 @@ def parse_downloads(raw):
 
     _log(f"parse_downloads: {len(downloads)} downloads parsed")
     for i, dl in enumerate(downloads[:5]):
-        _log(f"  [{i}] {dl['name'][:50]}... | {dl['progress']:.1f}% | {dl['status']} | src={dl['sources']}")
+        _log(f"  [{i}] {dl['name'][:50]}... | {float(dl.get('progress') or 0):.1f}% | {dl['status']} | src={dl['sources']}")
 
     return downloads
 
@@ -1167,89 +1200,86 @@ def build_action_history_payload(limit=30):
 
 def parse_search_results(raw):
     """Parse amulecmd 'results' output.
-    
-    Debian amulecmd 2.3.3 table format:
-      Nr.    Filename:                        Size(MB):  Sources:
-      -----------------------------------------------------------
-      0.    Lana Rhoades Blacked Anal.mp4     259.101    16
-      1.    Some Other File.mkv               1024.500   3
-    
-    Also handles: N) filename SIZE Sources: N
+
+    Supports table outputs, alternative parenthesized outputs, decimal commas
+    and Unicode filenames. Returned results are sorted by sources desc.
     """
     results = []
-    for line in raw.split("\n"):
+    seen_ids = set()
+    for line in str(raw or '').split("\n"):
         line = line.strip()
         if not line or line.startswith("---") or line.startswith("Nr.") or line.startswith("Filename"):
             continue
 
-        # Format 1: "N.  filename  SIZE  SOURCES" (Debian table format)
-        m_table = re.match(r'^(\d+)\.\s+(.+?)\s{2,}([\d.]+)\s+(\d+)\s*$', line)
+        m_table = re.match(r'^(\d+)\.\s+(.+?)\s{2,}([\d.,]+)\s+(\d+)\s*$', line)
         if m_table:
-            size_mb = float(m_table.group(3))
-            if size_mb > 1024:
-                size_str = f"{size_mb/1024:.1f} GB"
-            else:
-                size_str = f"{size_mb:.1f} MB"
-            results.append({
+            size_mb = parse_number_loose(m_table.group(3), 0.0) or 0.0
+            size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
+            item = {
                 "id": int(m_table.group(1)),
                 "name": m_table.group(2).strip(),
                 "size": size_str,
                 "size_mb": size_mb,
                 "sources": int(m_table.group(4))
-            })
+            }
+            if item['id'] not in seen_ids:
+                seen_ids.add(item['id'])
+                results.append(item)
             continue
 
-        # Format 2: "N) filename SIZE Sources: N" (other versions)
-        m_paren = re.match(r'^(\d+)\)\s+(.+?)\s+([\d.]+\s*[KMGT]?i?B)\s+Source[s]?:\s*(\d+)', line, re.I)
+        m_paren = re.match(r'^(\d+)[.)]\s+(.+?)\s+([\d.,]+\s*[KMGT]?i?B)\s+Source[s]?:?\s*(\d+)', line, re.I)
         if m_paren:
-            results.append({
+            item = {
                 "id": int(m_paren.group(1)),
                 "name": m_paren.group(2).strip(),
-                "size": m_paren.group(3),
+                "size": m_paren.group(3).replace(',', '.'),
+                "size_mb": round((size_to_bytes(m_paren.group(3).replace(',', '.')) or 0) / (1024 ** 2), 2),
                 "sources": int(m_paren.group(4))
-            })
+            }
+            if item['id'] not in seen_ids:
+                seen_ids.add(item['id'])
+                results.append(item)
             continue
 
-        # Format 3: "N) filename" or "N. filename" (with possible trailing size/sources)
         m_min = re.match(r'^(\d+)[.)]\s+(.+)', line)
         if m_min:
             rest = m_min.group(2).strip()
-            # Try: filename  SIZE  SOURCES (2+ spaces)
-            m_tail = re.search(r'^(.+?)\s{2,}([\d.]+)\s+(\d+)\s*$', rest)
+            m_tail = re.search(r'^(.+?)\s{2,}([\d.,]+)\s+(\d+)\s*$', rest)
             if m_tail:
-                size_mb = float(m_tail.group(2))
+                size_mb = parse_number_loose(m_tail.group(2), 0.0) or 0.0
                 size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
-                results.append({
+                item = {
                     "id": int(m_min.group(1)),
                     "name": m_tail.group(1).strip(),
                     "size": size_str,
                     "size_mb": size_mb,
                     "sources": int(m_tail.group(3))
-                })
+                }
             else:
-                # Try: filename SIZE SOURCES (single space, match trailing numbers)
-                m_tail2 = re.search(r'^(.+?)\s+([\d.]{3,})\s+(\d+)\s*$', rest)
-                if m_tail2 and float(m_tail2.group(2)) > 1:
-                    size_mb = float(m_tail2.group(2))
+                m_tail2 = re.search(r'^(.+?)\s+([\d.,]{3,})\s+(\d+)\s*$', rest)
+                if m_tail2 and (parse_number_loose(m_tail2.group(2), 0) or 0) > 1:
+                    size_mb = parse_number_loose(m_tail2.group(2), 0.0) or 0.0
                     size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
-                    results.append({
+                    item = {
                         "id": int(m_min.group(1)),
                         "name": m_tail2.group(1).strip(),
                         "size": size_str,
                         "size_mb": size_mb,
                         "sources": int(m_tail2.group(3))
-                    })
+                    }
                 else:
-                    results.append({
+                    item = {
                         "id": int(m_min.group(1)),
                         "name": rest,
                         "size": "",
+                        "size_mb": 0.0,
                         "sources": 0
-                    })
+                    }
+            if item['id'] not in seen_ids:
+                seen_ids.add(item['id'])
+                results.append(item)
 
-    # Sort by sources descending
-    results.sort(key=lambda x: x.get("sources", 0), reverse=True)
-
+    results.sort(key=lambda x: (x.get("sources", 0), x.get("size_mb", 0)), reverse=True)
     _log(f"parse_search_results: {len(results)} results parsed")
     return results
 
@@ -1914,10 +1944,12 @@ def extract_ed2k_links(text):
 def size_to_bytes(size_text):
     if not size_text:
         return None
-    m = re.match(r'([\d.]+)\s*([KMGTP]?)(?:i?B|o)', str(size_text).strip(), re.I)
+    m = re.match(r'([\d.,]+)\s*([KMGTP]?)(?:i?B|o)', str(size_text).strip(), re.I)
     if not m:
         return None
-    val = float(m.group(1))
+    val = parse_number_loose(m.group(1))
+    if val is None:
+        return None
     unit = m.group(2).upper()
     factors = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
     return int(val * factors.get(unit, 1))
@@ -2796,6 +2828,92 @@ def execute_locked_action(action, fn):
         lock.release()
 
 
+def _check_amuled_process():
+    try:
+        ps = subprocess.run(["pgrep", "-x", "amuled"], capture_output=True, text=True, timeout=5)
+        return {"ok": ps.returncode == 0, "pid": ps.stdout.strip() or None}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _check_ec_port():
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        result = s.connect_ex(("localhost", int(EC_PORT)))
+        s.close()
+        return {"ok": result == 0, "errno": result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _is_status_output_usable(raw):
+    low = str(raw or '').lower()
+    if not low.strip():
+        return False
+    return not any(token in low for token in (
+        'unable to connect',
+        'authentication failed',
+        'error: no password configured',
+        'connection failed',
+        'socket failed',
+    ))
+
+
+def build_health_payload(status_raw=None):
+    process_check = _check_amuled_process()
+    port_check = _check_ec_port()
+    raw = status_raw if status_raw is not None else run_amulecmd('status', timeout=8)
+    status_ok = _is_status_output_usable(raw)
+    status_info = parse_status(raw) if status_ok else {
+        'connected_ed2k': False,
+        'connected_kad': False,
+        'ed2k_status': 'disconnected',
+        'kad_status': 'disconnected',
+        'raw': raw,
+    }
+    components = {
+        'dashboard': {'ok': True, 'port': DASHBOARD_PORT},
+        'amuled_process': process_check,
+        'ec_port': port_check,
+        'core_status': {'ok': status_ok, 'ed2k_status': status_info.get('ed2k_status'), 'kad_status': status_info.get('kad_status')},
+    }
+    healthy = bool(process_check.get('ok'))
+    ready = healthy and bool(port_check.get('ok')) and status_ok
+    summary_bits = []
+    if not process_check.get('ok'):
+        summary_bits.append('amuled absent')
+    if not port_check.get('ok'):
+        summary_bits.append('port EC fermé')
+    if not status_ok:
+        summary_bits.append('status aMule indisponible')
+    if ready:
+        summary = 'aMule prêt'
+    elif healthy:
+        summary = 'dashboard vivant mais aMule pas prêt'
+    else:
+        summary = 'dashboard dégradé'
+    if summary_bits:
+        summary += ' — ' + ', '.join(summary_bits)
+    payload = {
+        'ok': healthy,
+        'ready': ready,
+        'summary': summary,
+        'components': components,
+        'status': status_info,
+        'digest': payload_digest({
+            'healthy': healthy,
+            'ready': ready,
+            'components': components,
+            'ed2k_status': status_info.get('ed2k_status'),
+            'kad_status': status_info.get('kad_status'),
+        }),
+        'generated_at': int(time.time()),
+    }
+    return payload
+
+
 def build_debug_snapshot():
     diag = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -2961,6 +3079,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True}).encode())
+            return
+
+        if path in ("/health", "/ready"):
+            payload = build_health_payload()
+            status = 200 if (payload.get('ready') if path == "/ready" else payload.get('ok')) else 503
+            self.send_json(payload, status)
             return
 
         if not self.check_auth():

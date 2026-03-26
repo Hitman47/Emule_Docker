@@ -1,0 +1,8 @@
+> BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB Beta.iso
+  100,0/800,0 MB  12%
+  Sources: 3
+  0,0 KB/s paused
+> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Alpha.iso
+  0,0/700,0 MB  0%
+  Sources: 0
+  0,0 KB/s waiting

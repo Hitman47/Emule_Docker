@@ -6,6 +6,7 @@ from unittest import mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'dashboard' / 'server.py'
+FIXTURES_DIR = Path(__file__).resolve().parent / 'fixtures'
 
 spec = importlib.util.spec_from_file_location('dashboard_server', MODULE_PATH)
 server = importlib.util.module_from_spec(spec)
@@ -24,6 +25,9 @@ class DashboardRegressionTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def fixture(self, name):
+        return (FIXTURES_DIR / name).read_text()
 
     def test_normalize_dashboard_config_clamps_values(self):
         cfg = server.normalize_dashboard_config({
@@ -293,6 +297,103 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(set(removed_ids), {items[0]['id'], items[1]['id']})
         self.assertEqual(server.get_saved_searches(), [])
 
+
+    def test_parse_downloads_fixture_handles_commas_unicode_and_errors(self):
+        raw = self.fixture('show_dl_mixed.txt')
+        downloads = server.parse_downloads(raw)
+        self.assertEqual(len(downloads), 3)
+        self.assertEqual(downloads[0]['status'], 'downloading')
+        self.assertAlmostEqual(downloads[0]['speed'], 1536.0, places=1)
+        self.assertEqual(downloads[1]['status'], 'waiting')
+        self.assertIn('Série étrangère', downloads[1]['name'])
+        self.assertGreater(downloads[1]['size_bytes'], 0)
+        self.assertEqual(downloads[2]['status'], 'error')
+        self.assertIn('insufficient disk space', downloads[2]['status_detail'].lower())
+
+    def test_parse_search_results_fixture_handles_decimal_commas_and_alt_lines(self):
+        raw = self.fixture('search_results_table.txt')
+        results = server.parse_search_results(raw)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0]['id'], 0)
+        self.assertEqual(results[0]['sources'], 33)
+        self.assertEqual(results[0]['size'], '1.0 GB')
+        alt = next(item for item in results if item['id'] == 2)
+        self.assertEqual(alt['size'], '1.5 GiB')
+        self.assertGreater(alt['size_mb'], 1500)
+
+    def test_build_health_payload_reports_ready_with_realistic_status_fixture(self):
+        status_raw = self.fixture('status_connected.txt')
+        with mock.patch.object(server, '_check_amuled_process', return_value={'ok': True, 'pid': '1234'}), \
+             mock.patch.object(server, '_check_ec_port', return_value={'ok': True, 'errno': 0}):
+            payload = server.build_health_payload(status_raw=status_raw)
+        self.assertTrue(payload['ok'])
+        self.assertTrue(payload['ready'])
+        self.assertEqual(payload['status']['ed2k_status'], 'low_id')
+        self.assertEqual(payload['status']['kad_status'], 'firewalled')
+        self.assertIn('aMule prêt', payload['summary'])
+        self.assertIn('digest', payload)
+
+    def test_build_health_payload_reports_not_ready_when_status_unusable(self):
+        with mock.patch.object(server, '_check_amuled_process', return_value={'ok': True, 'pid': '1234'}), \
+             mock.patch.object(server, '_check_ec_port', return_value={'ok': True, 'errno': 0}):
+            payload = server.build_health_payload(status_raw='ERROR: Unable to connect to aMule')
+        self.assertTrue(payload['ok'])
+        self.assertFalse(payload['ready'])
+        self.assertIn('status aMule indisponible', payload['summary'])
+
+    def test_end_to_end_transfer_flow_uses_fixture_outputs(self):
+        server.set_last_search_context('ubuntu', 'kad', [
+            {'id': 1, 'name': 'Alpha.iso', 'size': '700 MB', 'sources': 20},
+            {'id': 2, 'name': 'Beta.iso', 'size': '800 MB', 'sources': 8},
+        ])
+        before_raw = self.fixture('downloads_before.txt')
+        after_add = self.fixture('downloads_after_add.txt')
+        after_pause = self.fixture('downloads_after_pause.txt')
+        after_resume = self.fixture('downloads_after_resume.txt')
+        after_cancel = self.fixture('downloads_after_cancel.txt')
+
+        outputs = [before_raw, after_add, after_add, after_pause, after_pause, after_resume, after_resume, after_cancel]
+        command_log = []
+
+        def fake_run_amulecmd(command, timeout=20):
+            command_log.append(command)
+            if command == 'show dl':
+                return outputs.pop(0)
+            if command.startswith('pause '):
+                return 'OK'
+            if command.startswith('resume '):
+                return 'OK'
+            if command.startswith('cancel '):
+                return 'OK'
+            raise AssertionError(f'unexpected command: {command}')
+
+        with mock.patch.object(server, 'run_amulecmd', side_effect=fake_run_amulecmd), \
+             mock.patch.object(server, 'run_amulecmd_interactive', return_value='OK'), \
+             mock.patch.object(server.time, 'sleep', return_value=None):
+            bulk_payload, bulk_status = server.bulk_download_from_cached_search([1])
+            download_hash = bulk_payload['data']['changed_result_ids'] and bulk_payload['data']['results'][0].get('hash')
+            self.assertEqual(bulk_status, 200)
+            self.assertEqual(bulk_payload['data']['summary']['success'], 1)
+            self.assertEqual(download_hash, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+
+            pause_payload, pause_status = server.change_transfer_state('pause', download_hash)
+            self.assertEqual(pause_status, 200)
+            self.assertTrue(pause_payload['confirmed'])
+            self.assertEqual(pause_payload['data']['download']['status'], 'paused')
+
+            resume_payload, resume_status = server.change_transfer_state('resume', download_hash)
+            self.assertEqual(resume_status, 200)
+            self.assertTrue(resume_payload['confirmed'])
+            self.assertEqual(resume_payload['data']['download']['status'], 'waiting')
+
+            cancel_payload, cancel_status = server.change_transfer_state('cancel', download_hash)
+            self.assertEqual(cancel_status, 200)
+            self.assertTrue(cancel_payload['confirmed'])
+            self.assertEqual(cancel_payload['data']['removed_hashes'], [download_hash])
+
+        self.assertIn('pause AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', command_log)
+        self.assertIn('resume AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', command_log)
+        self.assertIn('cancel AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', command_log)
 
 if __name__ == '__main__':
     unittest.main()

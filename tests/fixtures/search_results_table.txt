@@ -1,0 +1,5 @@
+Nr.    Filename:                        Size(MB):  Sources:
+-----------------------------------------------------------
+0.    Ubuntu 24.04 LTS.iso              1024,500   33
+1.    Élément spécial épisode 01.mkv    700,125    12
+2)    Archive rétro set.zip             1,5 GiB Sources: 3

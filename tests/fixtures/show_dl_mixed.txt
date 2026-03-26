@@ -1,0 +1,12 @@
+> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Ubuntu 24.04.iso
+  512,0/1024,0 MB  50%
+  Sources: 12
+  1,5 MB/s downloading
+> BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB Série étrangère épisode 01.mkv
+  Size: 1,4 GiB
+  Sources: 0
+  128,0 KiB/s waiting for hash
+> CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC Broken Archive.rar
+  0,0/700,0 MB 0%
+  Sources: 2
+  insufficient disk space

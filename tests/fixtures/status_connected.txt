@@ -1,0 +1,6 @@
+ED2K: Connected to eMule Security No1 (91.200.42.46:1176) with Low ID
+Kad: Connected (Firewalled)
+Download: 1.5 MB
+Upload: 128.0 KB
+Clients in queue: 42
+Total sources: 1337
