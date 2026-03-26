@@ -81,6 +81,35 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertGreater(downloads[0]['size_bytes'], 0)
         self.assertAlmostEqual(downloads[0]['size_mb'], 1024.0, places=1)
 
+
+    def test_detect_download_issues_flags_stalled_and_no_sources(self):
+        raw = '''> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA File One.mkv
+  512.0/1024.0 MB  50%
+  Sources: 0
+  0.0 KB/s downloading
+'''
+        downloads = server.parse_downloads(raw)
+        self.assertEqual(len(downloads), 1)
+        self.assertIn('no_sources', downloads[0]['issues'])
+        self.assertIn('stalled', downloads[0]['issues'])
+        self.assertTrue(downloads[0]['problematic'])
+
+    def test_build_downloads_payload_exposes_issue_summary(self):
+        raw = '''> AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA File One.mkv
+  512.0/1024.0 MB  50%
+  Sources: 0
+  0.0 KB/s downloading
+> BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB File Two.iso
+  100.0/700.0 MB  14%
+  Sources: 8
+  4.0 KB/s downloading
+'''
+        payload = server.build_downloads_payload(raw=raw, include_raw=False)
+        self.assertEqual(payload['issues_summary']['problematic'], 2)
+        self.assertEqual(payload['issues_summary']['counts_by_issue']['no_sources'], 1)
+        self.assertEqual(payload['issues_summary']['counts_by_issue']['stalled'], 1)
+        self.assertEqual(payload['issues_summary']['counts_by_issue']['slow'], 1)
+
     def test_summarize_transfer_action_results_groups_codes_and_hashes(self):
         results = [
             {'hash': 'A'*32, 'name': 'One', 'code': 'SUCCESS', 'message': 'ok', 'before_status': 'downloading', 'after_status': 'paused', 'confirmed': True, 'ok': True},

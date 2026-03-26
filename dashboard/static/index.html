@@ -480,7 +480,7 @@ tr:hover{background:var(--bg3)}
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
     </div>
     <div class="card" style="margin-bottom:12px;padding:12px">
-      <div style="display:grid;grid-template-columns:2fr 170px 180px;gap:8px;align-items:end">
+      <div style="display:grid;grid-template-columns:2fr 160px 180px 190px;gap:8px;align-items:end">
         <div>
           <div class="label" style="margin-bottom:4px">Filtre nom</div>
           <input type="text" id="downloadNameFilter" placeholder="nom du fichier" oninput="applyDownloadFilters()">
@@ -495,6 +495,19 @@ tr:hover{background:var(--bg3)}
             <option value="paused">En pause</option>
             <option value="error">Erreurs</option>
             <option value="complete">Terminés</option>
+          </select>
+        </div>
+        <div>
+          <div class="label" style="margin-bottom:4px">Vue problèmes</div>
+          <select id="downloadIssuePreset" onchange="applyDownloadFilters()">
+            <option value="all">Tous</option>
+            <option value="problems">Tous les problèmes</option>
+            <option value="no_sources">Sans sources</option>
+            <option value="stalled">Bloqués</option>
+            <option value="slow">Lents</option>
+            <option value="disk_space">Espace disque</option>
+            <option value="waiting_hash">Attente hash</option>
+            <option value="error">Erreur</option>
           </select>
         </div>
         <div>
@@ -537,6 +550,7 @@ tr:hover{background:var(--bg3)}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
         <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(true)">☑ Sélectionner affichés</button>
         <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleDownloads(false)">☐ Désélectionner</button>
+        <button class="btn btn-ghost btn-sm" onclick="selectProblemDownloads()">⚠ Sélectionner problèmes</button>
         <button class="btn btn-ghost btn-sm" onclick="resetDownloadFilters()">↺ Réinitialiser filtres</button>
         <button class="btn btn-ghost btn-sm" onclick="handleSelectedTransferAction('pause', this)" data-requires-write="1">⏸ Pause sélection</button>
         <button class="btn btn-green btn-sm" onclick="handleSelectedTransferAction('resume', this)" data-requires-write="1">▶ Reprendre sélection</button>
@@ -892,6 +906,7 @@ function snapshotUiState() {
     downloadFilters: {
       name: document.getElementById('downloadNameFilter')?.value || '',
       status: document.getElementById('downloadStatusFilter')?.value || 'all',
+      issuePreset: document.getElementById('downloadIssuePreset')?.value || 'all',
       minSizeMb: document.getElementById('downloadMinSizeMb')?.value || '',
       maxSizeMb: document.getElementById('downloadMaxSizeMb')?.value || '',
       minSources: document.getElementById('downloadMinSources')?.value || '',
@@ -959,6 +974,7 @@ function restoreUiState() {
   const df = {
     downloadNameFilter: downloadFilters.name,
     downloadStatusFilter: downloadFilters.status,
+    downloadIssuePreset: downloadFilters.issuePreset,
     downloadMinSizeMb: downloadFilters.minSizeMb,
     downloadMaxSizeMb: downloadFilters.maxSizeMb,
     downloadMinSources: downloadFilters.minSources,
@@ -1227,6 +1243,7 @@ function getDownloadFilters() {
   const filters = {
     name: (document.getElementById('downloadNameFilter')?.value || '').trim().toLowerCase(),
     status: document.getElementById('downloadStatusFilter')?.value || 'all',
+    issuePreset: document.getElementById('downloadIssuePreset')?.value || 'all',
     sort: document.getElementById('downloadSort')?.value || 'speed_desc',
     minSizeMb: readNumberInput('downloadMinSizeMb'),
     maxSizeMb: readNumberInput('downloadMaxSizeMb'),
@@ -1237,6 +1254,7 @@ function getDownloadFilters() {
   writeUiState({downloadFilters: {
     name: document.getElementById('downloadNameFilter')?.value || '',
     status: filters.status,
+    issuePreset: filters.issuePreset,
     minSizeMb: document.getElementById('downloadMinSizeMb')?.value || '',
     maxSizeMb: document.getElementById('downloadMaxSizeMb')?.value || '',
     minSources: document.getElementById('downloadMinSources')?.value || '',
@@ -1251,6 +1269,7 @@ function resetDownloadFilters() {
   const defaults = {
     downloadNameFilter: '',
     downloadStatusFilter: 'all',
+    downloadIssuePreset: 'all',
     downloadSort: 'speed_desc',
     downloadMinSizeMb: '0',
     downloadMaxSizeMb: '0',
@@ -1423,16 +1442,47 @@ function downloadMatchesFilter(dl, statusFilter) {
   return status === statusFilter;
 }
 
-function renderDownloadsSummary(summary, filtered) {
+function downloadMatchesIssuePreset(dl, preset) {
+  const issues = Array.isArray(dl?.issues) ? dl.issues : [];
+  if (!preset || preset === 'all') return true;
+  if (preset === 'problems') return issues.length > 0;
+  return issues.includes(preset);
+}
+
+function issueLabel(issue) {
+  const labels = {
+    no_sources: 'sans sources',
+    stalled: 'bloqué',
+    slow: 'lent',
+    disk_space: 'disque',
+    waiting_hash: 'hash',
+    error: 'erreur',
+  };
+  return labels[issue] || issue;
+}
+
+function selectProblemDownloads() {
+  if (!window._selectedDownloadHashes) window._selectedDownloadHashes = new Set();
+  for (const dl of (window._filteredDownloads || [])) {
+    if (Array.isArray(dl.issues) && dl.issues.length) window._selectedDownloadHashes.add(dl.hash);
+  }
+  renderDownloadsTable(window._filteredDownloads || [], window._downloadsSummary || {}, window._downloadsIssuesSummary || {});
+}
+
+function renderDownloadsSummary(summary, filtered, issuesSummary = {}) {
   const box = document.getElementById('downloadsSummaryCards');
   if (!box) return;
   const s = summary || {total: 0, active: 0, paused: 0, waiting: 0, errors: 0, total_speed: 0, avg_progress: 0};
+  const issues = issuesSummary || {};
   const visibleCount = Array.isArray(filtered) ? filtered.length : 0;
   const cards = [
     ['Affichés', visibleCount],
     ['Actifs', s.active || 0],
     ['En pause', s.paused || 0],
     ['Attente', s.waiting || 0],
+    ['Problèmes', issues.problematic ?? s.problematic ?? 0],
+    ['Sans sources', issues.counts_by_issue?.no_sources || 0],
+    ['Bloqués', issues.counts_by_issue?.stalled || 0],
     ['Erreurs', s.errors || 0],
     ['Vitesse totale', (s.total_speed || 0) > 0 ? Number(s.total_speed).toFixed(1) + ' KB/s' : '—'],
   ];
@@ -1459,7 +1509,7 @@ function toggleSelectVisibleDownloads(checked) {
     if (checked) window._selectedDownloadHashes.add(dl.hash);
     else window._selectedDownloadHashes.delete(dl.hash);
   }
-  renderDownloadsTable(window._filteredDownloads || [], window._downloadsSummary || {});
+  renderDownloadsTable(window._filteredDownloads || [], window._downloadsSummary || {}, window._downloadsIssuesSummary || {});
 }
 
 function applyDownloadFilters() {
@@ -1472,6 +1522,7 @@ function applyDownloadFilters() {
     const speed = Number(dl?.speed || 0);
     if (filters.name && !name.includes(filters.name)) return false;
     if (!downloadMatchesFilter(dl, filters.status)) return false;
+    if (!downloadMatchesIssuePreset(dl, filters.issuePreset)) return false;
     if (filters.minSizeMb > 0 && (!(sizeMb > 0) || sizeMb < filters.minSizeMb)) return false;
     if (filters.maxSizeMb > 0 && sizeMb > filters.maxSizeMb) return false;
     if (filters.minSources > 0 && sources < filters.minSources) return false;
@@ -1489,13 +1540,13 @@ function applyDownloadFilters() {
   };
   filtered.sort(sorters[filters.sort] || sorters.speed_desc);
   window._filteredDownloads = filtered;
-  renderDownloadsTable(filtered, window._downloadsSummary || {});
+  renderDownloadsTable(filtered, window._downloadsSummary || {}, window._downloadsIssuesSummary || {});
 }
 
-function renderDownloadsTable(downloads, summary = {}) {
+function renderDownloadsTable(downloads, summary = {}, issuesSummary = {}) {
   const container = document.getElementById('downloadsTable');
   const d = Array.isArray(downloads) ? downloads : [];
-  renderDownloadsSummary(summary, d);
+  renderDownloadsSummary(summary, d, issuesSummary);
   updateDownloadFiltersInfo((window._downloadsAll || []).length, d.length);
 
   if (d.length === 0) {
@@ -1511,9 +1562,11 @@ function renderDownloadsTable(downloads, summary = {}) {
                         dl.status === 'waiting' || dl.status === 'getting sources' ? 'var(--blue)' : 'var(--text3)';
     const checked = window._selectedDownloadHashes?.has(dl.hash) ? 'checked' : '';
     const eta = dl.eta || '—';
+    const issues = Array.isArray(dl.issues) ? dl.issues : [];
+    const issueBadges = issues.slice(0, 3).map(issue => `<span style="display:inline-block;margin-top:4px;margin-right:4px;padding:2px 6px;border-radius:999px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.28);font-size:.68em;color:var(--orange)">${esc(issueLabel(issue))}</span>`).join('');
     html += `<tr>
       <td><input type="checkbox" ${checked} onchange="toggleDownloadSelection('${dl.hash}', this.checked)"></td>
-      <td class="fname" title="${esc(dl.name)}"><span class="row-link" onclick="loadDownloadDetail('${dl.hash}')">${esc(dl.name)}</span></td>
+      <td class="fname" title="${esc(dl.name)}"><span class="row-link" onclick="loadDownloadDetail('${dl.hash}')">${esc(dl.name)}</span>${issueBadges ? `<div>${issueBadges}</div>` : ''}</td>
       <td>${dl.size || '—'}</td>
       <td style="min-width:120px">
         <div class="pbar"><div class="fill dl" style="width:${dl.progress}%"></div></div>
@@ -1563,6 +1616,7 @@ async function loadDownloads(force = false) {
   const d = resp.downloads || [];
   window._downloadsAll = d.map(item => ({...item, eta: item.eta || item.eta_text || item.etaText || item.eta_estimate || item.eta || '—'}));
   window._downloadsSummary = resp.summary || {};
+  window._downloadsIssuesSummary = resp.issues_summary || {};
 
   document.getElementById('activeDl').textContent = d.length;
   const dlTab = document.querySelector('[data-tab="downloads"]');
@@ -3153,7 +3207,7 @@ function bindUiStatePersistence() {
   const ids = [
     'searchQuery', 'searchType',
     'resultNameFilter', 'resultExtFilter', 'resultMinSources', 'resultSort',
-    'downloadNameFilter', 'downloadStatusFilter', 'downloadMinSizeMb', 'downloadMaxSizeMb', 'downloadMinSources', 'downloadMinSpeed', 'downloadOnlySelected', 'downloadSort',
+    'downloadNameFilter', 'downloadStatusFilter', 'downloadIssuePreset', 'downloadMinSizeMb', 'downloadMaxSizeMb', 'downloadMinSources', 'downloadMinSpeed', 'downloadOnlySelected', 'downloadSort',
     'logNameSelect', 'logLevelFilter', 'logContains', 'logLinesCount'
   ];
   ids.forEach(id => {

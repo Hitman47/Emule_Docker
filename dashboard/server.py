@@ -997,6 +997,8 @@ def parse_downloads(raw):
             size_bytes = None
         item["size_bytes"] = size_bytes
         item["size_mb"] = round(size_bytes / (1024 ** 2), 2) if size_bytes else None
+        item["issues"] = detect_download_issues(item)
+        item["problematic"] = bool(item["issues"])
 
     _log(f"parse_downloads: {len(downloads)} downloads parsed")
     for i, dl in enumerate(downloads[:5]):
@@ -1085,6 +1087,63 @@ def get_download_detail(hash_value, raw=None, downloads=None):
     return target
 
 
+def detect_download_issues(download):
+    issues = []
+    status = str(download.get("status") or "").lower()
+    detail = str(download.get("status_detail") or "").lower()
+    try:
+        speed = float(download.get("speed") or 0)
+    except Exception:
+        speed = 0.0
+    try:
+        sources = int(download.get("sources") or 0)
+    except Exception:
+        sources = 0
+    try:
+        progress = float(download.get("progress") or 0)
+    except Exception:
+        progress = 0.0
+
+    incomplete = progress < 100
+    active_states = {"downloading", "hashing", "completing"}
+    source_sensitive_states = {"downloading", "waiting", "getting sources", "connecting", "queued", "allocating", "paused", "stopped"}
+
+    if status == "error":
+        issues.append("error")
+    if any(token in detail for token in ("disk", "space", "free space", "io error")):
+        issues.append("disk_space")
+    if incomplete and sources <= 0 and status in source_sensitive_states:
+        issues.append("no_sources")
+    if incomplete and speed <= 0 and status in active_states:
+        issues.append("stalled")
+    if incomplete and 0 < speed < 10 and status in active_states:
+        issues.append("slow")
+    if "waiting for hash" in detail:
+        issues.append("waiting_hash")
+
+    unique = []
+    seen = set()
+    for item in issues:
+        if item not in seen:
+            unique.append(item)
+            seen.add(item)
+    return unique
+
+
+def summarize_download_issues(downloads):
+    summary = {
+        "problematic": 0,
+        "counts_by_issue": {},
+    }
+    for dl in downloads or []:
+        issues = list(dl.get("issues") or detect_download_issues(dl))
+        if issues:
+            summary["problematic"] += 1
+        for issue in issues:
+            summary["counts_by_issue"][issue] = summary["counts_by_issue"].get(issue, 0) + 1
+    return summary
+
+
 def summarize_downloads(downloads):
     summary = {
         "total": len(downloads or []),
@@ -1097,6 +1156,7 @@ def summarize_downloads(downloads):
         "total_sources": 0,
         "avg_progress": 0.0,
         "counts_by_status": {},
+        "problematic": 0,
     }
     if not downloads:
         return summary
@@ -1133,6 +1193,8 @@ def summarize_downloads(downloads):
             progress_values.append(float(dl.get("progress") or 0))
         except Exception:
             pass
+        if dl.get("issues"):
+            summary["problematic"] += 1
 
     if progress_values:
         summary["avg_progress"] = round(sum(progress_values) / len(progress_values), 1)
@@ -1166,6 +1228,7 @@ def build_downloads_payload(raw=None, include_raw=True):
     for item in data:
         item["eta"] = estimate_eta_text(item)
     summary = summarize_downloads(data)
+    issues_summary = summarize_download_issues(data)
     digest_items = [{
         "hash": item.get("hash"),
         "name": item.get("name"),
@@ -1175,12 +1238,14 @@ def build_downloads_payload(raw=None, include_raw=True):
         "status": item.get("status"),
         "size_bytes": item.get("size_bytes"),
         "eta": item.get("eta"),
+        "issues": item.get("issues") or [],
     } for item in data]
     payload = {
         "downloads": data,
         "count": len(data),
         "summary": summary,
-        "digest": payload_digest({"downloads": digest_items, "summary": summary}),
+        "issues_summary": issues_summary,
+        "digest": payload_digest({"downloads": digest_items, "summary": summary, "issues_summary": issues_summary}),
         "generated_at": int(time.time()),
     }
     if include_raw:
