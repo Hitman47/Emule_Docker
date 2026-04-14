@@ -23,12 +23,12 @@ CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
 # ── Performance tuning (ZimaBoard 832 optimized) ──
-MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-300}
-MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-200}
-MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-15}
+MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-500}
+MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-500}
+MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-40}
 DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
-SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-30}
+SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
 
 reset_cron_file() {
     cat > "$CRON_FILE" <<'CRONEOF'
@@ -151,6 +151,23 @@ mod_source_scanner() {
 mod_stall_detector() {
     printf "[MOD] Stall detector activé (toutes les 5 min)\n"
     add_cron_job "*/5 * * * *" "stall-detector" "/opt/scripts/stall-detector.sh >> /var/log/stall-detector.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
+# NEW: Connectivity diagnostic logger (every 3min)
+# ═══════════════════════════════════════════
+mod_connectivity_diag() {
+    printf "[MOD] Connectivity diagnostic activé (toutes les 3 min)\n"
+    mkdir -p /var/log/amule-diag
+    add_cron_job "*/3 * * * *" "connectivity-diag" "/opt/scripts/connectivity-diag.sh 2>&1"
+}
+
+# ═══════════════════════════════════════════
+# NEW: VPN port forwarding auto-detect (every 10min)
+# ═══════════════════════════════════════════
+mod_port_forward() {
+    printf "[MOD] VPN port forward detection activé (toutes les 10 min)\n"
+    add_cron_job "*/10 * * * *" "port-forward" "/opt/scripts/port-forward-detect.sh >> /var/log/amule-diag/port-forward.log 2>&1"
 }
 
 # ═══════════════════════════════════════════
@@ -298,8 +315,8 @@ Reconnect=1
 Scoresystem=1
 Serverlist=1
 AddServerListFromServer=1
-AddServerListFromClient=0
-SafeServerConnect=1
+AddServerListFromClient=1
+SafeServerConnect=0
 AutoConnectStaticOnly=0
 UPnPEnabled=0
 SmartIdCheck=1
@@ -412,9 +429,9 @@ Skin=
 MaxClientVersions=0
 [Obfuscation]
 IsClientCryptLayerSupported=1
-IsCryptLayerRequested=1
-IsClientCryptLayerRequired=1
-CryptoPaddingLenght=254
+IsCryptLayerRequested=0
+IsClientCryptLayerRequired=0
+CryptoPaddingLenght=128
 CryptoKadUDPKey=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
 [PowerManagement]
 PreventSleepWhileDownloading=0
@@ -531,6 +548,22 @@ printf "━━━━━━━━━━━━━━━━━━━━━━━━
 printf "━━━ Server list fix ━━━\n"
 sed -i 's/^Serverlist=0/Serverlist=1/' "$AMULE_CONF" 2>/dev/null
 sed -i 's/^AddServerListFromServer=0/AddServerListFromServer=1/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^AddServerListFromClient=0/AddServerListFromClient=1/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^SafeServerConnect=1/SafeServerConnect=0/' "$AMULE_CONF" 2>/dev/null
+
+# ── FORCE-FIX: Obfuscation too restrictive kills peer discovery ──
+printf "━━━ Obfuscation fix ━━━\n"
+sed -i 's/^IsClientCryptLayerRequired=1/IsClientCryptLayerRequired=0/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^IsCryptLayerRequested=1/IsCryptLayerRequested=0/' "$AMULE_CONF" 2>/dev/null
+CRYPT_REQ=$(grep '^IsClientCryptLayerRequired=' "$AMULE_CONF" | head -1 | cut -d= -f2)
+printf "  IsClientCryptLayerRequired=%s (should be 0)\n" "${CRYPT_REQ:-?}"
+
+# ── FORCE-FIX: Connection limits for better source discovery ──
+printf "━━━ Connection limits fix ━━━\n"
+sed -i "s/^MaxSourcesPerFile=.*/MaxSourcesPerFile=${MAX_SOURCES}/" "$AMULE_CONF" 2>/dev/null
+sed -i "s/^MaxConnections=.*/MaxConnections=${MAX_CONNECTIONS}/" "$AMULE_CONF" 2>/dev/null
+sed -i "s/^MaxConnectionsPerFiveSeconds=.*/MaxConnectionsPerFiveSeconds=${MAX_CONN_5SEC}/" "$AMULE_CONF" 2>/dev/null
+printf "  MaxSourcesPerFile=%s MaxConnections=%s MaxConn5s=%s\n" "$MAX_SOURCES" "$MAX_CONNECTIONS" "$MAX_CONN_5SEC"
 SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)
 printf "  Serverlist=%s\n" "$SRVLIST_VAL"
 ADDSRV_VAL=$(grep '^AddServerListFromServer=' "$AMULE_CONF" | head -1 | cut -d= -f2)
@@ -573,6 +606,8 @@ mod_backup
 mod_kad_monitor
 mod_source_scanner
 mod_stall_detector
+mod_connectivity_diag
+mod_port_forward
 init_settings
 
 if [ "$CRON_HAS_JOBS" -eq 1 ]; then
@@ -651,6 +686,12 @@ printf "\n[AMULE] Démarrage d'aMule...\n\n"
     done
 
     printf "[AUTO-CONNECT] Termine.\n"
+
+    # Run initial diagnostics
+    printf "[AUTO-CONNECT] Lancement diagnostic initial...\n"
+    /opt/scripts/port-forward-detect.sh >> /var/log/amule-diag/port-forward.log 2>&1 || true
+    /opt/scripts/connectivity-diag.sh 2>&1 || true
+    printf "[AUTO-CONNECT] Diagnostic initial terminé.\n"
 ) &
 
 while true; do

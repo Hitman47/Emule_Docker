@@ -22,6 +22,12 @@ services:
       - WIREGUARD_PRIVATE_KEY=${NORDVPN_PRIVATE_KEY}
       - SERVER_COUNTRIES=Netherlands
       - TZ=Europe/Paris
+      # ── Port forwarding (essentiel pour High ID / sources) ──
+      - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_PROVIDER=nordvpn
+      # Règles firewall pour laisser passer aMule
+      - FIREWALL_INPUT_PORTS=4662,4711,4712,8078
+      - FIREWALL_OUTBOUND_SUBNETS=0.0.0.0/0
     ports:
       # aMule P2P (à ouvrir sur ta box/routeur)
       - "4662:4662"       # ED2K TCP
@@ -81,9 +87,9 @@ services:
       - BACKUP_KEEP=4
 
       # Limites performance ZimaBoard 832
-      - AMULE_MAX_CONNECTIONS=300
-      - AMULE_MAX_SOURCES_PER_FILE=200
-      - AMULE_MAX_CONN_PER_5SEC=15
+      - AMULE_MAX_CONNECTIONS=500
+      - AMULE_MAX_SOURCES_PER_FILE=500
+      - AMULE_MAX_CONN_PER_5SEC=40
       - AMULE_DOWNLOAD_CAPACITY=300
       - AMULE_UPLOAD_CAPACITY=80
 
@@ -92,6 +98,7 @@ services:
       - ./data/incoming:/incoming
       - ./data/temp:/temp
       - ./data/backups:/backups
+      - ./data/logs:/var/log/amule-diag
 
     # Fix epoll bug on modern Linux kernels
     ulimits:

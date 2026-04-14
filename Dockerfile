@@ -19,6 +19,7 @@ RUN apt-get update \
         procps \
         pwgen \
         python3 \
+        netcat-openbsd \
         tzdata \
         unzip \
         wget \
@@ -38,7 +39,7 @@ RUN chmod +x /opt/scripts/*.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh \
-    && mkdir -p /home/amule /incoming /temp /backups
+    && mkdir -p /home/amule /incoming /temp /backups /var/log/amule-diag
 
 WORKDIR /home/amule
 

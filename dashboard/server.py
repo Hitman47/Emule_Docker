@@ -3503,7 +3503,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
-                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log"}
+                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log",
+                          "connectivity": "/var/log/amule-diag/connectivity.log",
+                          "port-forward": "/var/log/amule-diag/port-forward.log"}
             if log_name in valid_logs:
                 try:
                     with open(valid_logs[log_name], "r") as f:
@@ -3513,7 +3515,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     self.send_json({"ok": True, "name": log_name, "lines": ["(aucun log encore)"], "counts": {"error": 0, "warn": 0, "info": 0, "other": 0}, "returned": 1, "matched_total": 1, "available_total": 0, "level": level, "contains": contains, "limit": int(lines_limit or 120)})
             else:
-                self.send_json({"error": "Log inconnu"}, 400)
+                self.send_json({"error": "Log inconnu", "available": list(valid_logs.keys())}, 400)
+
+        elif path == "/api/diagnostics":
+            # Return the latest connectivity diagnostic snapshot
+            diag_snapshot_path = "/var/log/amule-diag/last-snapshot.json"
+            diag_history_path = "/var/log/amule-diag/diag-history.jsonl"
+            result = {"ok": True, "snapshot": None, "history": [], "log_tail": []}
+            try:
+                with open(diag_snapshot_path, "r") as f:
+                    result["snapshot"] = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                result["snapshot"] = None
+            # Last 100 history entries
+            try:
+                with open(diag_history_path, "r") as f:
+                    lines = f.readlines()
+                    for line in lines[-100:]:
+                        line = line.strip()
+                        if line:
+                            try:
+                                result["history"].append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+            except FileNotFoundError:
+                pass
+            # Tail of connectivity log
+            try:
+                with open("/var/log/amule-diag/connectivity.log", "r") as f:
+                    all_lines = f.readlines()
+                    result["log_tail"] = [l.rstrip() for l in all_lines[-80:]]
+            except FileNotFoundError:
+                pass
+            self.send_json(result)
 
         elif path == "/api/search_history":
             h = _load_history()
