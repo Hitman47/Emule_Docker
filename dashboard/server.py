@@ -869,27 +869,27 @@ def parse_status(raw):
                 info["connected_kad"] = True
 
         # ── Speeds (multiple formats) ──
-        m = re.search(r'dl:\s*([\d.]+)\s*kb/s.*ul:\s*([\d.]+)\s*kb/s', ll)
+        m = re.search(r'dl:\s*([\d.]+)\s*k[bo]/s.*ul:\s*([\d.]+)\s*k[bo]/s', ll)
         if m:
             info["download_speed"] = float(m.group(1))
             info["upload_speed"] = float(m.group(2))
 
         # "Download: X bytes/sec" format
         if "download:" in ll:
-            m2 = re.search(r'download:\s*([\d.]+)\s*(bytes|kb|mb)', ll)
+            m2 = re.search(r'download:\s*([\d.]+)\s*(bytes|octets|k[bo]|m[bo])', ll)
             if m2:
                 val = float(m2.group(1))
                 unit = m2.group(2)
-                if unit == "bytes": val /= 1024
-                elif unit == "mb": val *= 1024
+                if unit in ("bytes", "octets"): val /= 1024
+                elif unit in ("mb", "mo"): val *= 1024
                 info["download_speed"] = val
         if "upload:" in ll:
-            m2 = re.search(r'upload:\s*([\d.]+)\s*(bytes|kb|mb)', ll)
+            m2 = re.search(r'upload:\s*([\d.]+)\s*(bytes|octets|k[bo]|m[bo])', ll)
             if m2:
                 val = float(m2.group(1))
                 unit = m2.group(2)
-                if unit == "bytes": val /= 1024
-                elif unit == "mb": val *= 1024
+                if unit in ("bytes", "octets"): val /= 1024
+                elif unit in ("mb", "mo"): val *= 1024
                 info["upload_speed"] = val
 
         # Clients / Sources
@@ -921,12 +921,13 @@ def parse_number_loose(value, default=None):
 def speed_to_kb(value_text, unit_text):
     value = parse_number_loose(value_text, 0.0)
     unit = str(unit_text or '').strip().lower()
-    if unit in ('bytes', 'byte', 'b'):
+    if unit in ('bytes', 'byte', 'b', 'o', 'octet', 'octets'):
         return round(value / 1024, 2)
-    if unit.startswith('m'):
+    if unit.startswith('m'):  # MB, Mo
         return round(value * 1024, 2)
-    if unit.startswith('g'):
+    if unit.startswith('g'):  # GB, Go
         return round(value * 1024 * 1024, 2)
+    # KB, Ko, or default
     return round(value, 2)
 
 
@@ -1005,7 +1006,7 @@ def parse_downloads(raw):
         if m_pct:
             current["progress"] = parse_number_loose(m_pct.group(1), current["progress"])
 
-        m_frac = re.search(r'([\d.,]+)\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bb])', attr)
+        m_frac = re.search(r'([\d.,]+)\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
         if m_frac:
             total_value = parse_number_loose(m_frac.group(2))
             current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
@@ -1014,7 +1015,7 @@ def parse_downloads(raw):
                 if done is not None and total_value and total_value > 0:
                     current["progress"] = round(done / total_value * 100, 1)
         elif not current["size"]:
-            m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bb])', attr, re.I)
+            m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bo])', attr, re.I)
             if m_size:
                 current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
 
@@ -1026,7 +1027,7 @@ def parse_downloads(raw):
             if m_src2:
                 current["sources"] = int(m_src2.group(1))
 
-        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bb]|bytes?)\s*/s', attr, re.I)
+        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bo]|bytes?|octets?)\s*/s', attr, re.I)
         if m_spd:
             current["speed"] = speed_to_kb(m_spd.group(1), m_spd.group(2))
 
@@ -1065,11 +1066,11 @@ def estimate_eta_text(download):
     if speed <= 0 or progress <= 0 or progress >= 100:
         return "—"
     size = str(download.get("size") or "")
-    m = re.match(r'([\d.]+)\s*([KMGT]?i?[Bb])', size, re.I)
+    m = re.match(r'([\d.]+)\s*([KMGT]?i?[Bo])', size, re.I)
     if not m:
         return "—"
     total = float(m.group(1))
-    unit = m.group(2).upper().replace("IB", "B")
+    unit = m.group(2).upper().replace("IB", "B").replace("O", "B")
     mult = {"B": 1/1024, "KB": 1, "MB": 1024, "GB": 1024*1024, "TB": 1024*1024*1024}
     total_kb = total * mult.get(unit, 1)
     remaining_kb = total_kb * (1 - progress / 100)
@@ -1341,7 +1342,7 @@ def parse_search_results(raw):
                 results.append(item)
             continue
 
-        m_paren = re.match(r'^(\d+)[.)]\s+(.+?)\s+([\d.,]+\s*[KMGT]?i?B)\s+Source[s]?:?\s*(\d+)', line, re.I)
+        m_paren = re.match(r'^(\d+)[.)]\s+(.+?)\s+([\d.,]+\s*[KMGT]?i?[Bo])\s+Source[s]?:?\s*(\d+)', line, re.I)
         if m_paren:
             item = {
                 "id": int(m_paren.group(1)),

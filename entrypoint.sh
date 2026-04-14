@@ -310,7 +310,7 @@ MaxConnections=${MAX_CONNECTIONS}
 MaxConnectionsPerFiveSeconds=${MAX_CONN_5SEC}
 RemoveDeadServer=1
 DeadServerRetry=2
-ServerKeepAliveTimeout=0
+ServerKeepAliveTimeout=300
 Reconnect=1
 Scoresystem=1
 Serverlist=1
@@ -334,7 +334,7 @@ ManualHighPrio=0
 StartNextFile=1
 StartNextFileSameCat=0
 StartNextFileAlpha=0
-FileBufferSizePref=1400
+FileBufferSizePref=8192
 DAPPref=1
 UAPPref=1
 AllocateFullFile=0
@@ -396,7 +396,7 @@ ProxyEnablePassword=0
 ProxyUser=
 ProxyPassword=
 [ExternalConnect]
-UseSrcSeeds=0
+UseSrcSeeds=1
 AcceptExternalConnections=1
 ECAddress=
 ECPort=4712
@@ -564,6 +564,14 @@ sed -i "s/^MaxSourcesPerFile=.*/MaxSourcesPerFile=${MAX_SOURCES}/" "$AMULE_CONF"
 sed -i "s/^MaxConnections=.*/MaxConnections=${MAX_CONNECTIONS}/" "$AMULE_CONF" 2>/dev/null
 sed -i "s/^MaxConnectionsPerFiveSeconds=.*/MaxConnectionsPerFiveSeconds=${MAX_CONN_5SEC}/" "$AMULE_CONF" 2>/dev/null
 printf "  MaxSourcesPerFile=%s MaxConnections=%s MaxConn5s=%s\n" "$MAX_SOURCES" "$MAX_CONNECTIONS" "$MAX_CONN_5SEC"
+
+# ── FORCE-FIX: Buffer and source persistence ──
+printf "━━━ Buffer & source fixes ━━━\n"
+sed -i 's/^FileBufferSizePref=.*/FileBufferSizePref=8192/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^ServerKeepAliveTimeout=0/ServerKeepAliveTimeout=300/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^UseSrcSeeds=0/UseSrcSeeds=1/' "$AMULE_CONF" 2>/dev/null
+printf "  FileBufferSizePref=8192 ServerKeepAlive=300 UseSrcSeeds=1\n"
+printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)
 printf "  Serverlist=%s\n" "$SRVLIST_VAL"
 ADDSRV_VAL=$(grep '^AddServerListFromServer=' "$AMULE_CONF" | head -1 | cut -d= -f2)

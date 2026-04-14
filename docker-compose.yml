@@ -41,6 +41,12 @@ services:
       - "8078:8078"
     volumes:
       - gluetun-data:/gluetun
+    sysctls:
+      - net.core.somaxconn=1024
+      - net.core.rmem_max=4194304
+      - net.core.wmem_max=4194304
+      - net.core.rmem_default=262144
+      - net.core.wmem_default=262144
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9999/v1/openvpn/status"]
@@ -105,8 +111,6 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    sysctls:
-      - net.core.somaxconn=1024
 
     deploy:
       resources:
