@@ -1006,7 +1006,7 @@ def parse_downloads(raw):
         if m_pct:
             current["progress"] = parse_number_loose(m_pct.group(1), current["progress"])
 
-        m_frac = re.search(r'([\d.,]+)\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
+        m_frac = re.search(r'([\d.,]+)\s*(?:[KMGT]?i?[Bo])?\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
         if m_frac:
             total_value = parse_number_loose(m_frac.group(2))
             current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
@@ -3548,6 +3548,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     result["log_tail"] = [l.rstrip() for l in all_lines[-80:]]
             except FileNotFoundError:
                 pass
+            # Raw amulecmd output for debugging parse issues
+            try:
+                with open("/var/log/amule-diag/last-raw-showdl.txt", "r") as f:
+                    result["raw_show_dl"] = f.read()[:4000]
+            except FileNotFoundError:
+                result["raw_show_dl"] = None
             self.send_json(result)
 
         elif path == "/api/search_history":

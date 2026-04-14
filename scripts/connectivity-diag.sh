@@ -139,6 +139,12 @@ log "  Speed: DL=${DL_SPEED:-0} kB/s  UL=${UL_SPEED:-0} kB/s"
 log "── DOWNLOADS & SOURCES ──"
 DL_RAW=$(amulecmd_run "show dl")
 
+# Dump raw output for debugging parse issues
+RAW_DUMP_FILE="${LOG_DIR}/last-raw-showdl.txt"
+echo "$DL_RAW" > "$RAW_DUMP_FILE"
+log "  Raw 'show dl' saved to $RAW_DUMP_FILE"
+log "  First 5 lines: $(echo "$DL_RAW" | head -5 | tr '\n' ' | ')"
+
 TOTAL_DL=0
 ACTIVE_DL=0
 ZERO_SOURCE=0

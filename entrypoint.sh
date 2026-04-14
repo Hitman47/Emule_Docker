@@ -627,6 +627,13 @@ start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
+# ── Network buffer tuning (applied at runtime for VPN throughput) ──
+sysctl -w net.core.rmem_max=4194304 2>/dev/null || true
+sysctl -w net.core.wmem_max=4194304 2>/dev/null || true
+sysctl -w net.core.rmem_default=262144 2>/dev/null || true
+sysctl -w net.core.wmem_default=262144 2>/dev/null || true
+sysctl -w net.core.somaxconn=1024 2>/dev/null || true
+
 # Auto-connect verification (background)
 # With Serverlist=1 and server.met downloaded, amuled should auto-connect.
 # This just verifies and imports extra servers.
