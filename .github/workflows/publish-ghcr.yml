@@ -38,3 +38,5 @@ jobs:
           tags: |
             ghcr.io/${{ steps.img.outputs.owner_lc }}/emuledocker:latest
             ghcr.io/${{ steps.img.outputs.owner_lc }}/emuledocker:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
