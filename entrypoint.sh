@@ -150,7 +150,7 @@ mod_source_scanner() {
 # ═══════════════════════════════════════════
 mod_stall_detector() {
     printf "[MOD] Stall detector activé (toutes les 5 min)\n"
-    add_cron_job "*/5 * * * *" "stall-detector" "/opt/scripts/stall-detector.sh >> /var/log/stall-detector.log 2>&1"
+    add_cron_job "*/5 * * * *" "stall-detector" "/opt/scripts/stall-detector.sh >> /var/log/amule-diag/stall-detector.log 2>&1"
 }
 
 # ═══════════════════════════════════════════

@@ -460,13 +460,7 @@ tr:hover{background:var(--bg3)}
     </div>
 
     <hr style="border-color:var(--border);margin:24px 0 16px">
-    <h3 style="font-size:.95em;margin-bottom:10px;color:var(--text2)">📎 Ajouter un lien ED2K</h3>
-    <div class="ed2k-box" style="align-items:flex-start">
-      <textarea id="ed2kLink" placeholder="Un ou plusieurs liens ed2k://|file|... ou ed2k://|serverlist|..." rows="3" style="resize:vertical;min-height:78px"></textarea>
-      <button class="btn btn-primary btn-sm" onclick="addEd2k()">Ajouter</button>
-    </div>
-    <div style="font-size:.76em;color:var(--text3);margin-top:6px">Tu peux coller plusieurs liens, ou un bloc de texte contenant des liens ED2K.</div>
-    <div id="ed2kMsg" class="msg"></div>
+    <div style="font-size:.76em;color:var(--text3)">💡 Tu peux aussi ajouter des liens ED2K directement depuis l'onglet Transferts.</div>
   </div>
 
   <!-- ══════════════════════════════════════════ -->
@@ -478,6 +472,16 @@ tr:hover{background:var(--bg3)}
       <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)" data-requires-write="1">▶ Tout reprendre</button>
       <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)" data-requires-write="1">⏸ Tout pauser</button>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
+    </div>
+
+    <!-- ED2K Link Input (moved from search) -->
+    <div class="card" style="margin-bottom:12px;padding:12px">
+      <div class="label" style="margin-bottom:8px">📎 Ajouter un lien ED2K</div>
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <textarea id="ed2kLink" placeholder="Un ou plusieurs liens ed2k://|file|... ou ed2k://|serverlist|..." rows="2" style="resize:vertical;min-height:52px;flex:1"></textarea>
+        <button class="btn btn-primary btn-sm" onclick="addEd2k()" style="white-space:nowrap">Ajouter</button>
+      </div>
+      <div id="ed2kMsg" class="msg"></div>
     </div>
     <div class="card" style="margin-bottom:12px;padding:12px">
       <div style="display:grid;grid-template-columns:2fr 160px 180px 190px;gap:8px;align-items:end">
@@ -652,6 +656,27 @@ tr:hover{background:var(--bg3)}
         <button class="btn btn-ghost btn-sm" onclick="kadStatus()">🔄 Vérifier</button>
       </div>
       <p style="font-size:.78em;color:var(--text3);margin-top:8px">Un monitor automatique vérifie Kad toutes les 15 min et reconnecte si nécessaire.</p>
+    </div>
+
+    <!-- Smart Reconnection Settings -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:10px">🔄 Reconnexion automatique (anti-stall)</div>
+      <p style="color:var(--text2);font-size:.85em;line-height:1.5;margin-bottom:12px">
+        Si aucun téléchargement ne progresse pendant le délai configuré, le système change automatiquement de serveur ED2K et relance la recherche de sources Kad.
+      </p>
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">
+        <label style="font-size:.85em;color:var(--text2);white-space:nowrap">Délai sans progrès :</label>
+        <select id="stallTimeoutMinutes" onchange="saveStallTimeout()" style="padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none;min-width:140px">
+          <option value="15">15 minutes</option>
+          <option value="20">20 minutes</option>
+          <option value="30" selected>30 minutes</option>
+          <option value="45">45 minutes</option>
+          <option value="60">1 heure</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="forceReconnectNow()">⚡ Forcer maintenant</button>
+      </div>
+      <div id="stallSettingsMsg" class="msg"></div>
+      <p style="font-size:.78em;color:var(--text3);margin-top:6px">Le stall-detector vérifie toutes les 5 min. Après le délai choisi, il change de serveur et relance Kad.</p>
     </div>
 
     <!-- Server Sources Management -->
@@ -1020,7 +1045,7 @@ function switchTab(tabName, opts = {}) {
   if (tabName === 'downloads') loadDownloads(true);
   if (tabName === 'servers') loadServers();
   if (tabName === 'files') loadFiles();
-  if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
+  if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); loadStallTimeout(); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
   if (tabName === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
 }
 
@@ -2934,6 +2959,33 @@ async function kadReconnect() {
   } else {
     showToast('err', 'Erreur');
   }
+}
+
+// ── Stall Timeout Settings ──
+async function saveStallTimeout() {
+  const minutes = parseInt(document.getElementById('stallTimeoutMinutes').value) || 30;
+  const d = await api('/api/settings');
+  if (!d?.settings) return;
+  d.settings.stall_timeout_minutes = minutes;
+  const r = await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(d.settings)});
+  const msg = document.getElementById('stallSettingsMsg');
+  if (r?.ok) { msg.className='msg ok show'; msg.textContent=`Délai: ${minutes} min`; }
+  else { msg.className='msg err show'; msg.textContent='Erreur'; }
+  setTimeout(()=>msg.classList.remove('show'), 3000);
+}
+async function loadStallTimeout() {
+  const d = await api('/api/settings');
+  if (d?.settings?.stall_timeout_minutes) {
+    const sel = document.getElementById('stallTimeoutMinutes');
+    if (sel) sel.value = String(d.settings.stall_timeout_minutes);
+  }
+}
+async function forceReconnectNow() {
+  if (!ensureWritable('La reconnexion')) return;
+  showToast('info', 'Reconnexion forcée...');
+  await api('/api/kad/reconnect');
+  await api('/api/connect?target=ed2k');
+  showToast('ok', 'Reconnexion Kad + changement serveur ED2K lancés');
 }
 
 // ── Scan Now ──

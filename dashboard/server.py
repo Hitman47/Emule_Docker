@@ -106,6 +106,7 @@ def _default_settings():
     return {
         "server_sources": [dict(v) for v in DEFAULT_SERVER_SOURCES.values()],
         "last_scan": None,
+        "stall_timeout_minutes": 30,
         "dashboard": dict(DEFAULT_DASHBOARD_CONFIG),
     }
 
@@ -143,6 +144,12 @@ def normalize_settings(raw=None):
     if isinstance(sources, list) and sources:
         settings["server_sources"] = sources
     settings["dashboard"] = normalize_dashboard_config(raw.get("dashboard"))
+    # Stall timeout (15-60 min)
+    try:
+        stall = int(raw.get("stall_timeout_minutes", 30))
+        settings["stall_timeout_minutes"] = max(15, min(60, stall))
+    except Exception:
+        settings["stall_timeout_minutes"] = 30
     return settings
 
 
@@ -1002,45 +1009,64 @@ def parse_downloads(raw):
         attr = re.sub(r'^>\s*', '', stripped)
         al = attr.lower()
 
-        # ── Speed MUST be parsed FIRST to avoid '47.81 KB/s' being read as size '47.81 KB' ──
+        # ── Speed (must be first to avoid confusion with size) ──
         m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bo]|bytes?|octets?)\s*/s', attr, re.I)
         is_speed_line = bool(m_spd)
         if m_spd:
             current["speed"] = speed_to_kb(m_spd.group(1), m_spd.group(2))
 
-        m_pct = re.search(r'([\d.,]+)\s*%', attr)
+        # ── Progress: [24.5%] or plain 24.5% ──
+        m_pct = re.search(r'\[?([\d.,]+)\s*%\]?', attr)
         if m_pct:
             current["progress"] = parse_number_loose(m_pct.group(1), current["progress"])
 
-        # ── Size parsing — SKIP if this line is a speed line ──
+        # ── Sources: X/Y WITHOUT a unit = sources (found/total) ──
+        # Must distinguish from size fraction (X/Y MB)
         if not is_speed_line:
-            m_frac = re.search(r'([\d.,]+)\s*(?:[KMGT]?i?[Bo])?\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
-            if m_frac:
-                total_value = parse_number_loose(m_frac.group(2))
-                current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
+            m_frac_unit = re.search(r'([\d.,]+)\s*(?:[KMGT]?i?[Bo])?\s*/\s*([\d.,]+)\s*([KMGT]i?[Bo])', attr, re.I)
+            if m_frac_unit:
+                # Has unit → it's a SIZE fraction
+                total_value = parse_number_loose(m_frac_unit.group(2))
+                current["size"] = f"{str(m_frac_unit.group(2)).replace(',', '.')} {m_frac_unit.group(3)}"
                 if current["progress"] == 0:
-                    done = parse_number_loose(m_frac.group(1))
+                    done = parse_number_loose(m_frac_unit.group(1))
                     if done is not None and total_value and total_value > 0:
                         current["progress"] = round(done / total_value * 100, 1)
-            elif not current["size"]:
-                # Negative lookahead: reject '47.81 KB/s' patterns
-                m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bo])(?!\s*/)', attr, re.I)
-                if m_size:
-                    current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
+            else:
+                # No unit → X/Y is sources (amulecmd compact format)
+                m_frac_bare = re.search(r'(\d+)\s*/\s*(\d+)', attr)
+                if m_frac_bare:
+                    found = int(m_frac_bare.group(1))
+                    total = int(m_frac_bare.group(2))
+                    current["sources"] = total if total > 0 else found
 
+        # ── Fallback size (standalone, no fraction) ──
+        if not is_speed_line and not current["size"]:
+            m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bo])(?!\s*/)', attr, re.I)
+            if m_size:
+                current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
+
+        # ── Sources from labeled format ──
         m_src = re.search(r'(\d+)\s*(?:source|src)', al)
         if m_src:
             current["sources"] = int(m_src.group(1))
-        else:
+        elif not current["sources"]:
             m_src2 = re.search(r'sources?\s*:?\s*(\d+)', al)
             if m_src2:
                 current["sources"] = int(m_src2.group(1))
 
-        status, detail = classify_download_status(attr)
-        if status:
-            current["status"] = status
-            if detail:
-                current["status_detail"] = detail
+        # ── Status from dash-separated format: "- Waiting -" or "- Downloading -" ──
+        m_dash_status = re.search(r'-\s*(Waiting|Downloading|Paused|Stopped|Hashing|Completing|Complete|Getting Sources|Connecting|Allocating|Error)\s*-', attr, re.I)
+        if m_dash_status:
+            raw_status = m_dash_status.group(1).lower()
+            status_map = {"getting sources": "getting sources", "waiting": "waiting"}
+            current["status"] = status_map.get(raw_status, raw_status)
+        else:
+            status, detail = classify_download_status(attr)
+            if status:
+                current["status"] = status
+                if detail:
+                    current["status_detail"] = detail
 
     if current:
         downloads.append(current)
@@ -3516,7 +3542,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
-                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log",
+                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
                           "connectivity": "/var/log/amule-diag/connectivity.log",
                           "port-forward": "/var/log/amule-diag/port-forward.log",
                           "completions": "/var/log/amule-diag/completions.log",
