@@ -11,8 +11,8 @@ printf "\n"
 # ── Variables ──
 AMULE_UID=${PUID:-1000}
 AMULE_GID=${PGID:-1000}
-AMULE_INCOMING=${INCOMING_DIR:-"/incoming"}
-AMULE_TEMP=${TEMP_DIR:-"/temp"}
+AMULE_INCOMING=${INCOMING_DIR:-"/downloads/incoming"}
+AMULE_TEMP=${TEMP_DIR:-"/downloads/temp"}
 AMULE_HOME=/home/amule/.aMule
 AMULE_CONF=${AMULE_HOME}/amule.conf
 REMOTE_CONF=${AMULE_HOME}/remote.conf
@@ -77,7 +77,7 @@ mod_fix_kad_bootstrap() {
 
 mod_auto_share() {
     MOD_AUTO_SHARE_ENABLED=${MOD_AUTO_SHARE_ENABLED:-"false"}
-    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/incoming"}
+    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/downloads/incoming"}
     if [ "$MOD_AUTO_SHARE_ENABLED" = "true" ]; then
         printf "[MOD] Auto-share activé: %s\n" "$MOD_AUTO_SHARE_DIRECTORIES"
         SHAREDDIR_CONF="${AMULE_HOME}/shareddir.dat"
@@ -262,7 +262,7 @@ fi
 
 mkdir -p /home/amule
 
-for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups"; do
+for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups" "/downloads"; do
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
@@ -588,6 +588,43 @@ if grep -q '^CoreEnabled=0' "$AMULE_CONF" 2>/dev/null; then
     ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
     printf "  UserEvents/DownloadCompleted enabled\n"
 fi
+
+# ── FORCE-FIX: TempDir and IncomingDir MUST be on same mount (cross-device rename fix) ──
+printf "━━━ Cross-device rename fix ━━━\n"
+CURRENT_TEMP=$(grep '^TempDir=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
+CURRENT_INC=$(grep '^IncomingDir=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
+printf "  Current: TempDir=%s IncomingDir=%s\n" "$CURRENT_TEMP" "$CURRENT_INC"
+
+NEED_FIX=0
+if [ "$CURRENT_TEMP" != "$AMULE_TEMP" ]; then
+    sed -i "s|^TempDir=.*|TempDir=${AMULE_TEMP}|" "$AMULE_CONF"
+    NEED_FIX=1
+fi
+if [ "$CURRENT_INC" != "$AMULE_INCOMING" ]; then
+    sed -i "s|^IncomingDir=.*|IncomingDir=${AMULE_INCOMING}|" "$AMULE_CONF"
+    NEED_FIX=1
+fi
+if [ "$NEED_FIX" -eq 1 ]; then
+    printf "  [!] Updated: TempDir=%s IncomingDir=%s\n" "$AMULE_TEMP" "$AMULE_INCOMING"
+    printf "  [!] Both are now under same mount point to prevent file loss\n"
+else
+    printf "  [✓] Paths already correct\n"
+fi
+
+# Migrate existing files from old paths if they exist
+for OLD_DIR in /incoming /temp; do
+    if [ -d "$OLD_DIR" ] && [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ]; then
+        case "$OLD_DIR" in
+            /incoming) TARGET="$AMULE_INCOMING" ;;
+            /temp)     TARGET="$AMULE_TEMP" ;;
+        esac
+        if [ "$OLD_DIR" != "$TARGET" ]; then
+            printf "  Migrating %s → %s\n" "$OLD_DIR" "$TARGET"
+            mkdir -p "$TARGET"
+            cp -an "$OLD_DIR"/* "$TARGET"/ 2>/dev/null || true
+        fi
+    fi
+done
 
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)

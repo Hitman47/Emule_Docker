@@ -91,8 +91,9 @@ DL_SPEED=${DL_SPEED:-0}
 TOTAL_DL=$(echo "$ACTIVE_HASHES" | wc -w)
 log "Check: ${TOTAL_DL} DLs, speed=${DL_SPEED} kB/s, timeout=${TIMEOUT_MIN}min (threshold=${STALL_THRESHOLD})"
 
-# Create fingerprint
-FINGERPRINT=$(echo "$DL_RAW" | md5sum | cut -d' ' -f1)
+# Create fingerprint from ONLY percentage + source counts (stable between checks)
+# Extract just "[X.X%]    N/   N" patterns — these only change when actual progress happens
+FINGERPRINT=$(echo "$DL_RAW" | grep -oE '\[[0-9.,]+%\]\s+[0-9]+/\s*[0-9]+' | sort | md5sum | cut -d' ' -f1)
 
 # Read previous state
 PREV_FINGERPRINT=""

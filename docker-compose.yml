@@ -95,8 +95,7 @@ services:
 
     volumes:
       - ./data/amule-config:/home/amule/.aMule
-      - ./data/incoming:/incoming
-      - ./data/temp:/temp
+      - ./data/downloads:/downloads
       - ./data/backups:/backups
       - ./data/logs:/var/log/amule-diag
 
