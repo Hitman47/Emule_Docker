@@ -334,7 +334,7 @@ ManualHighPrio=0
 StartNextFile=1
 StartNextFileSameCat=0
 StartNextFileAlpha=0
-FileBufferSizePref=8192
+FileBufferSizePref=524288
 DAPPref=1
 UAPPref=1
 AllocateFullFile=0
@@ -567,10 +567,10 @@ printf "  MaxSourcesPerFile=%s MaxConnections=%s MaxConn5s=%s\n" "$MAX_SOURCES" 
 
 # ── FORCE-FIX: Buffer and source persistence ──
 printf "━━━ Buffer & source fixes ━━━\n"
-sed -i 's/^FileBufferSizePref=.*/FileBufferSizePref=8192/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^FileBufferSizePref=.*/FileBufferSizePref=524288/' "$AMULE_CONF" 2>/dev/null
 sed -i 's/^ServerKeepAliveTimeout=0/ServerKeepAliveTimeout=300/' "$AMULE_CONF" 2>/dev/null
 sed -i 's/^UseSrcSeeds=0/UseSrcSeeds=1/' "$AMULE_CONF" 2>/dev/null
-printf "  FileBufferSizePref=8192 ServerKeepAlive=300 UseSrcSeeds=1\n"
+printf "  FileBufferSizePref=524288 ServerKeepAlive=300 UseSrcSeeds=1\n"
 
 # ── FORCE-FIX: Sparse files break on Docker overlay2 ──
 sed -i 's/^CreateSparseFiles=1/CreateSparseFiles=0/' "$AMULE_CONF" 2>/dev/null

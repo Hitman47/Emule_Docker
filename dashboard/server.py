@@ -1056,8 +1056,9 @@ def parse_downloads(raw):
         item["problematic"] = bool(item["issues"])
 
     _log(f"parse_downloads: {len(downloads)} downloads parsed")
+    _log(f"  RAW first 500 chars: {str(raw or '')[:500].replace(chr(10), ' | ')}")
     for i, dl in enumerate(downloads[:5]):
-        _log(f"  [{i}] {dl['name'][:50]}... | {float(dl.get('progress') or 0):.1f}% | {dl['status']} | src={dl['sources']}")
+        _log(f"  [{i}] {dl['name'][:50]}... | size={dl['size']!r} | {float(dl.get('progress') or 0):.1f}% | spd={dl['speed']} | {dl['status']} | src={dl['sources']}")
 
     return downloads
 
@@ -1279,6 +1280,12 @@ def build_status_payload(raw=None):
 
 def build_downloads_payload(raw=None, include_raw=True):
     raw = raw if raw is not None else run_amulecmd("show dl")
+    # Save raw output for debugging
+    try:
+        with open("/var/log/amule-diag/last-raw-showdl.txt", "w") as _f:
+            _f.write(raw or "")
+    except Exception:
+        pass
     data = parse_downloads(raw)
     for item in data:
         item["eta"] = estimate_eta_text(item)
