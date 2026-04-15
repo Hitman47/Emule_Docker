@@ -17,7 +17,7 @@ Résumé des correctifs :
    - Fonction + cron retirés de entrypoint.sh
    - Variable env retirée de docker-compose.yml
    - Endpoint /api/organize retiré de server.py
-   - Sous-dossiers (Video/Audio/…) ne sont plus créés
+   - Bouton "Organiser fichiers" retiré de l'UI
    - scripts/file-organizer.sh à supprimer
 
 2. MIGRATION unique (marqueur .migrated)
@@ -25,9 +25,9 @@ Résumé des correctifs :
      qu'une seule fois grâce au fichier /downloads/.migrated
 
 3. ONGLET RECHERCHE supprimé
-   - Tab, panneau HTML et raccourci Ctrl+K retirés
-   - CSS dédié supprimé
+   - Tab, panneau HTML, CSS dédié et raccourci Ctrl+K retirés
    - Les fonctions JS restent (dead code inoffensif)
+   - panel-dashboard INTACT (corrigé v2)
 
 4. UNICODE FIX (noms de fichiers français)
    - send_json encode maintenant avec errors='replace'

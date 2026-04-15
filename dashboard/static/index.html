@@ -197,6 +197,115 @@ tr:hover{background:var(--bg3)}
   </div>
 
   <!-- ══════════════════════════════════════════ -->
+  <!-- TAB: Dashboard / Monitoring                -->
+  <!-- ══════════════════════════════════════════ -->
+  <div class="panel active" id="panel-dashboard">
+    <div class="cards" id="statsCards">
+      <div class="card">
+        <div class="label">↓ Téléchargement</div>
+        <div class="value" id="dlSpeed">—<span class="unit">KB/s</span></div>
+        <div class="sparkline" id="dlSparkline"></div>
+      </div>
+      <div class="card">
+        <div class="label">↑ Upload</div>
+        <div class="value" id="ulSpeed">—<span class="unit">KB/s</span></div>
+        <div class="sparkline" id="ulSparkline"></div>
+      </div>
+      <div class="card">
+        <div class="label">Transferts actifs</div>
+        <div class="value" id="activeDl">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Fichiers terminés</div>
+        <div class="value" id="totalFiles">—</div>
+      </div>
+    </div>
+
+    <!-- Connection status banner -->
+    <div class="conn-banner" id="connBanner">
+      <div class="conn-box red" id="connEd2k">
+        <div class="conn-dot"></div>
+        <div>
+          <div class="conn-label">ED2K</div>
+          <div class="conn-value" id="connEd2kValue">Chargement...</div>
+          <div class="conn-detail" id="connEd2kDetail"></div>
+        </div>
+      </div>
+      <div class="conn-box red" id="connKad">
+        <div class="conn-dot"></div>
+        <div>
+          <div class="conn-label">Kad</div>
+          <div class="conn-value" id="connKadValue">Chargement...</div>
+          <div class="conn-detail" id="connKadDetail"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Disk usage -->
+    <div class="cards">
+      <div class="card disk-card">
+        <div class="label">💾 Disque — Incoming</div>
+        <div class="value" id="diskInFree">—<span class="unit">Go libre</span></div>
+        <div class="disk-bar">
+          <div class="pbar"><div class="fill disk" id="diskInBar" style="width:0%"></div></div>
+          <div class="disk-label"><span id="diskInUsed">—</span><span id="diskInTotal">—</span></div>
+        </div>
+      </div>
+      <div class="card disk-card">
+        <div class="label">💾 Disque — Temp</div>
+        <div class="value" id="diskTmpFree">—<span class="unit">Go libre</span></div>
+        <div class="disk-bar">
+          <div class="pbar"><div class="fill disk" id="diskTmpBar" style="width:0%"></div></div>
+          <div class="disk-label"><span id="diskTmpUsed">—</span><span id="diskTmpTotal">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats history chart -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="label">📈 Historique transferts</div>
+        <select id="statsRange" onchange="loadStatsChart()" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text2);font-size:.78em">
+          <option value="7">7 jours</option>
+          <option value="14">14 jours</option>
+          <option value="30" selected>30 jours</option>
+        </select>
+      </div>
+      <div id="statsBarChart" style="display:flex;align-items:flex-end;gap:3px;height:130px"></div>
+      <div id="statsLabels" style="display:flex;gap:3px;font-size:.6em;color:var(--text3);margin-top:4px;overflow:hidden"></div>
+      <div style="display:flex;gap:16px;margin-top:8px;font-size:.78em;color:var(--text3)">
+        <span style="color:var(--accent)">■ Téléchargement</span>
+        <span style="color:var(--green)">■ Upload</span>
+        <span id="statsTotalInfo"></span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <div class="label" style="margin-bottom:8px">📡 Détails connexion</div>
+      <pre id="rawStatus" style="font-size:.8em;color:var(--text2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto"></pre>
+    </div>
+
+    <!-- Stats history chart -->
+    <!-- Stats history chart -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="label">📈 Historique transferts (7 jours)</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadStatsChart()" style="padding:3px 8px;font-size:.72em">🔄</button>
+      </div>
+      <div id="statsChart" style="height:140px;position:relative"></div>
+      <div style="font-size:.75em;color:var(--text3);margin-top:6px;display:flex;gap:16px">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#6366f1;display:inline-block"></span> DL: <span id="statsTotalDl">—</span></span>
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#22c55e;display:inline-block"></span> UL: <span id="statsTotalUl">—</span></span>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="connectED2K()">🔌 Reconnecter ED2K</button>
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect?target=kad')">🔌 Reconnecter Kad</button>
+    </div>
+    <div id="connectResult" class="msg" style="margin-top:8px"></div>
+  </div>
+  <!-- ══════════════════════════════════════════ -->
   <!-- TAB: Downloads                             -->
   <!-- ══════════════════════════════════════════ -->
   <div class="panel" id="panel-downloads">
@@ -884,7 +993,6 @@ function renderSparkline(containerId, data, color) {
     <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".7"/>
   </svg>`;
 }
-
 
 // ── Status / Monitoring ──
 async function loadStatus(force = false) {
