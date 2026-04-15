@@ -3511,7 +3511,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
                           "backup": "/var/log/backup.log", "stall-detector": "/var/log/stall-detector.log",
                           "connectivity": "/var/log/amule-diag/connectivity.log",
-                          "port-forward": "/var/log/amule-diag/port-forward.log"}
+                          "port-forward": "/var/log/amule-diag/port-forward.log",
+                          "completions": "/var/log/amule-diag/completions.log",
+                          "file-events": "/var/log/amule-diag/file-events.log"}
             if log_name in valid_logs:
                 try:
                     with open(valid_logs[log_name], "r") as f:
@@ -3559,6 +3561,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     result["raw_show_dl"] = f.read()[:4000]
             except FileNotFoundError:
                 result["raw_show_dl"] = None
+            # Completion events log (tracks what happens when downloads finish)
+            try:
+                with open("/var/log/amule-diag/completions.log", "r") as f:
+                    result["completions_tail"] = [l.rstrip() for l in f.readlines()[-40:]]
+            except FileNotFoundError:
+                result["completions_tail"] = []
+            # File events log (inotify: create/move/delete in /incoming and /temp)
+            try:
+                with open("/var/log/amule-diag/file-events.log", "r") as f:
+                    result["file_events_tail"] = [l.rstrip() for l in f.readlines()[-60:]]
+            except FileNotFoundError:
+                result["file_events_tail"] = []
             self.send_json(result)
 
         elif path == "/api/search_history":

@@ -383,7 +383,7 @@ Language=fr_FR.UTF-8
 DateTimeFormat=%A, %x, %X
 KadNodesUrl=${KAD_NODES_DAT_URL}
 Ed2kServersUrl=${SERVER_MET_URL}
-CreateSparseFiles=1
+CreateSparseFiles=0
 [Browser]
 OpenPageInTab=1
 CustomBrowserString=
@@ -437,8 +437,8 @@ CryptoKadUDPKey=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
 PreventSleepWhileDownloading=0
 [UserEvents]
 [UserEvents/DownloadCompleted]
-CoreEnabled=0
-CoreCommand=
+CoreEnabled=1
+CoreCommand=/opt/scripts/on-download-complete.sh "%FILE" "%NAME" "%HASH" "%SIZE"
 GUIEnabled=0
 GUICommand=
 [UserEvents/NewChatSession]
@@ -571,6 +571,24 @@ sed -i 's/^FileBufferSizePref=.*/FileBufferSizePref=8192/' "$AMULE_CONF" 2>/dev/
 sed -i 's/^ServerKeepAliveTimeout=0/ServerKeepAliveTimeout=300/' "$AMULE_CONF" 2>/dev/null
 sed -i 's/^UseSrcSeeds=0/UseSrcSeeds=1/' "$AMULE_CONF" 2>/dev/null
 printf "  FileBufferSizePref=8192 ServerKeepAlive=300 UseSrcSeeds=1\n"
+
+# ── FORCE-FIX: Sparse files break on Docker overlay2 ──
+sed -i 's/^CreateSparseFiles=1/CreateSparseFiles=0/' "$AMULE_CONF" 2>/dev/null
+printf "  CreateSparseFiles=0 (overlay2 fix)\n"
+
+# ── FORCE-FIX: Enable download completion event ──
+if grep -q '^CoreEnabled=0' "$AMULE_CONF" 2>/dev/null; then
+    # Replace the DownloadCompleted section
+    awk '
+        /^\[UserEvents\/DownloadCompleted\]/{sect=1}
+        sect && /^CoreEnabled=/{$0="CoreEnabled=1"; sect_done=1}
+        sect && /^CoreCommand=/{$0="CoreCommand=/opt/scripts/on-download-complete.sh \"%FILE\" \"%NAME\" \"%HASH\" \"%SIZE\""}
+        sect && /^\[/ && !/^\[UserEvents\/DownloadCompleted\]/{sect=0}
+        {print}
+    ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
+    printf "  UserEvents/DownloadCompleted enabled\n"
+fi
+
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)
 printf "  Serverlist=%s\n" "$SRVLIST_VAL"
@@ -633,6 +651,11 @@ sysctl -w net.core.wmem_max=4194304 2>/dev/null || true
 sysctl -w net.core.rmem_default=262144 2>/dev/null || true
 sysctl -w net.core.wmem_default=262144 2>/dev/null || true
 sysctl -w net.core.somaxconn=1024 2>/dev/null || true
+
+# ── Start file watcher (tracks all file events in /incoming and /temp) ──
+chmod +x /opt/scripts/file-watcher.sh 2>/dev/null || true
+/opt/scripts/file-watcher.sh &
+printf "[WATCHER] File event watcher started (PID: $!)\n"
 
 # Auto-connect verification (background)
 # With Serverlist=1 and server.met downloaded, amuled should auto-connect.
