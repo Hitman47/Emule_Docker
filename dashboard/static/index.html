@@ -416,6 +416,27 @@ tr:hover{background:var(--bg3)}
       </div>
       <div id="downloadDetailBox"><div class="empty" style="padding:18px">Clique sur un transfert pour voir le détail.</div></div>
     </div>
+
+    <!-- Connected Clients Panel -->
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div class="label">👥 Clients connectés / File d'attente</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span id="clientsSummary" style="font-size:.74em;color:var(--text3)"></span>
+          <button class="btn btn-ghost btn-sm" onclick="loadClients(true)">🔄</button>
+        </div>
+      </div>
+      <div id="lowIdWarning" style="display:none;padding:10px 14px;margin-bottom:10px;border-radius:8px;font-size:.84em;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);color:var(--orange)">
+        ⚠️ <strong>Low ID détecté</strong> — Tu ne peux pas te connecter aux autres clients Low ID (la majorité).
+        Tes sources « waiting » ne progresseront que si elles ont un High ID.
+        <strong>Solution :</strong> active le port forwarding dans ton VPN (Gluetun : <code>VPN_PORT_FORWARDING=on</code>)
+        ou utilise un VPN qui le supporte (Proton, AirVPN…).
+      </div>
+      <div id="clientsTable">
+        <div class="empty" style="padding:18px">Chargement...</div>
+      </div>
+    </div>
+
     <details style="margin-top:12px">
       <summary style="font-size:.78em;color:var(--text3);cursor:pointer">Sortie brute amulecmd (debug)</summary>
       <pre id="downloadsRaw" style="font-size:.72em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px;max-height:200px;overflow:auto;white-space:pre-wrap"></pre>
@@ -884,7 +905,7 @@ function switchTab(tabName, opts = {}) {
   panel.classList.add('active');
   if (persist) persistUiState({activeTab: tabName});
   if (!load) return;
-  if (tabName === 'downloads') loadDownloads(true);
+  if (tabName === 'downloads') { loadDownloads(true); loadClients(true); }
   if (tabName === 'servers') loadServers();
   if (tabName === 'files') loadFiles();
   if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); loadStallTimeout(); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
@@ -1001,6 +1022,7 @@ async function loadStatus(force = false) {
   if (!d) return;
   if (d.unchanged) return;
   if (d.digest) window._viewDigests.status = d.digest;
+  window._lastStatus = d;
 
   // ── ED2K pill + banner ──
   const ed2kPill = document.getElementById('pillEd2k');
@@ -2333,6 +2355,62 @@ function showSearchSuggestions(val) {
   }
 }
 
+// ── Connected Clients Panel ──
+async function loadClients(force = false) {
+  const container = document.getElementById('clientsTable');
+  const summary = document.getElementById('clientsSummary');
+  const lowIdWarn = document.getElementById('lowIdWarning');
+  if (!container) return;
+
+  const d = await api('/api/clients');
+  if (!d) {
+    container.innerHTML = '<div class="empty" style="padding:14px">Impossible de charger les clients</div>';
+    return;
+  }
+
+  // Show LowID warning based on last known status
+  const lastStatus = window._lastStatus || {};
+  const isLowId = lastStatus.ed2k_status === 'low_id' || lastStatus.ed2k_status === 'connected';
+  if (lowIdWarn) lowIdWarn.style.display = isLowId ? 'block' : 'none';
+
+  const uploads = d.uploads || [];
+  const queue = d.queue || {};
+  const queueClients = queue.clients_in_queue || 0;
+  const totalSources = queue.total_sources || 0;
+
+  if (summary) {
+    const parts = [];
+    if (uploads.length) parts.push(uploads.length + ' upload(s) actif(s)');
+    if (queueClients) parts.push(queueClients + ' en file d\'attente');
+    if (totalSources) parts.push(totalSources + ' sources trouvées');
+    summary.textContent = parts.length ? parts.join(' · ') : 'Aucun client connecté';
+  }
+
+  if (!uploads.length && !queueClients) {
+    container.innerHTML = '<div class="empty" style="padding:14px">Aucun client connecté actuellement. ' +
+      (isLowId ? 'Le Low ID limite fortement la connectivité.' : 'Les clients devraient apparaître quand un téléchargement progresse.') + '</div>';
+    return;
+  }
+
+  let html = '<table><tr><th>Client</th><th>Fichier</th><th>Vitesse ↑</th></tr>';
+  for (const c of uploads) {
+    const fname = c.file ? esc(c.file.length > 60 ? c.file.slice(0, 57) + '...' : c.file) : '<span style="color:var(--text3)">—</span>';
+    const speed = c.speed > 0 ? c.speed.toFixed(1) + ' KB/s' : '—';
+    html += `<tr><td style="font-weight:600;font-size:.84em">${esc(c.client || '?')}</td><td class="fname" style="font-size:.82em">${fname}</td><td style="font-size:.82em">${speed}</td></tr>`;
+  }
+  html += '</table>';
+
+  if (queueClients || totalSources) {
+    html += '<div style="display:flex;gap:16px;margin-top:10px;padding:8px 10px;background:var(--bg);border-radius:8px;font-size:.8em;color:var(--text2)">';
+    if (queueClients) html += '<span>📤 File d\'attente upload : <strong>' + queueClients + '</strong></span>';
+    if (totalSources) html += '<span>🔗 Sources trouvées : <strong>' + totalSources + '</strong></span>';
+    if (queue.banned_clients) html += '<span>🚫 Bannis : <strong>' + queue.banned_clients + '</strong></span>';
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+}
+
 // ── Stats Chart (SVG bar chart) ──
 async function loadStatsChart() {
   const d = await api('/api/stats_history');
@@ -3079,6 +3157,7 @@ function restartAutoRefresh() {
     await loadStatus();
     await loadDownloads();
     const tab = getActiveTab();
+    if (tab === 'downloads') await loadClients();
     if (tab === 'servers') await loadServers();
     if (tab === 'settings') {
       await loadActionHistory();

@@ -1437,6 +1437,79 @@ def parse_search_results(raw):
     return results
 
 
+
+def parse_uploads(raw):
+    """Parse amulecmd 'show ul' output to extract connected upload clients."""
+    clients = []
+    for line in str(raw or '').split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("---"):
+            continue
+        # Skip header lines
+        low = stripped.lower()
+        if any(tok in low for tok in ("this is amulecmd", "creating client", "succeeded", "connection established", "uploading")):
+            continue
+        # Try to extract client info: various amulecmd formats
+        # Format: "> ClientName  Filename  Speed"
+        cleaned = re.sub(r'^>\s*', '', stripped)
+        if not cleaned:
+            continue
+        # Parse speed at end: "12.5 kB/s" or similar
+        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bo]|bytes?)\/s\s*$', cleaned, re.I)
+        speed = 0
+        if m_spd:
+            speed = speed_to_kb(m_spd.group(1), m_spd.group(2))
+            cleaned = cleaned[:m_spd.start()].strip()
+        # What remains: might be "ClientName  Filename" or just a line
+        parts = re.split(r'\s{2,}|\t', cleaned)
+        if len(parts) >= 2:
+            clients.append({
+                "client": parts[0].strip(),
+                "file": parts[1].strip() if len(parts) > 1 else "",
+                "speed": speed,
+                "extra": parts[2].strip() if len(parts) > 2 else "",
+            })
+        elif cleaned and not cleaned.startswith("Uploading") and len(cleaned) > 3:
+            clients.append({
+                "client": cleaned,
+                "file": "",
+                "speed": speed,
+                "extra": "",
+            })
+    return clients
+
+
+def build_clients_payload():
+    """Build payload with upload queue, statistics, and source info."""
+    ul_raw = run_amulecmd("show ul", timeout=10)
+    stats_raw = run_amulecmd("statistics", timeout=10)
+    uploads = parse_uploads(ul_raw)
+
+    # Extract useful stats from statistics output
+    queue_info = {"clients_in_queue": 0, "banned_clients": 0, "total_sources": 0}
+    for line in str(stats_raw or '').split("\n"):
+        ll = line.lower().strip()
+        m = re.search(r'(\d+)', ll)
+        if not m:
+            continue
+        val = int(m.group(1))
+        if "clients in queue" in ll or "in upload queue" in ll:
+            queue_info["clients_in_queue"] = val
+        elif "banned" in ll:
+            queue_info["banned_clients"] = val
+        elif "found sources" in ll or "total sources" in ll:
+            queue_info["total_sources"] = val
+
+    return {
+        "uploads": uploads,
+        "upload_count": len(uploads),
+        "queue": queue_info,
+        "raw_ul": ul_raw,
+        "raw_stats_excerpt": stats_raw[:2000] if stats_raw else "",
+        "generated_at": int(time.time()),
+    }
+
+
 def get_disk_info():
     info = {}
     for name, path in [("incoming", INCOMING_DIR), ("temp", TEMP_DIR)]:
@@ -3459,6 +3532,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/stats":
             self.send_json({"raw": run_amulecmd("statistics")})
+
+        elif path == "/api/clients":
+            cached = cache_get("clients", 5)
+            if not cached:
+                cached = build_clients_payload()
+                cache_set("clients", cached)
+            self.send_json(cached)
 
         elif path == "/api/action_history":
             limit = int(qs.get("limit", ["30"])[0] or "30")
