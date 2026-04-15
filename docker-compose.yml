@@ -78,8 +78,6 @@ services:
       - MOD_AUTO_SHARE_ENABLED=false
 
       # Nouvelles features
-      - FILE_ORGANIZER_ENABLED=true
-      - FILE_ORGANIZER_CRON=*/10 * * * *
       - SERVER_UPDATE_ENABLED=true
       - SERVER_UPDATE_CRON=0 4 * * *
       - BACKUP_ENABLED=true

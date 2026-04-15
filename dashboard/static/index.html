@@ -68,13 +68,6 @@ header h1 span{font-size:.7em;color:var(--text3);font-weight:400}
 .card .value{font-size:1.5em;font-weight:700}
 .card .unit{font-size:.6em;color:var(--text2);font-weight:400;margin-left:2px}
 
-/* ── Search ── */
-.search-box{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
-.search-box input{flex:1;min-width:200px;padding:10px 16px;background:var(--bg2);
-  border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:.95em;outline:none}
-.search-box input:focus{border-color:var(--accent)}
-.search-box select{padding:10px 12px;background:var(--bg2);border:1px solid var(--border);
-  border-radius:var(--radius);color:var(--text);font-size:.88em;outline:none;cursor:pointer}
 .btn{padding:10px 20px;border:none;border-radius:var(--radius);font-size:.9em;
   font-weight:600;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
 .btn-primary{background:var(--accent);color:#fff}
@@ -197,270 +190,10 @@ tr:hover{background:var(--bg3)}
   <!-- ── Navigation ── -->
   <div class="tabs" id="tabNav">
     <div class="tab active" data-tab="dashboard">📊 Monitoring</div>
-    <div class="tab" data-tab="search">🔍 Recherche</div>
     <div class="tab" data-tab="downloads">⬇️ Transferts</div>
     <div class="tab" data-tab="servers">🌐 Serveurs</div>
     <div class="tab" data-tab="files">📁 Fichiers</div>
     <div class="tab" data-tab="settings">⚙️ Paramètres</div>
-  </div>
-
-  <!-- ══════════════════════════════════════════ -->
-  <!-- TAB: Dashboard / Monitoring                -->
-  <!-- ══════════════════════════════════════════ -->
-  <div class="panel active" id="panel-dashboard">
-    <div class="cards" id="statsCards">
-      <div class="card">
-        <div class="label">↓ Téléchargement</div>
-        <div class="value" id="dlSpeed">—<span class="unit">KB/s</span></div>
-        <div class="sparkline" id="dlSparkline"></div>
-      </div>
-      <div class="card">
-        <div class="label">↑ Upload</div>
-        <div class="value" id="ulSpeed">—<span class="unit">KB/s</span></div>
-        <div class="sparkline" id="ulSparkline"></div>
-      </div>
-      <div class="card">
-        <div class="label">Transferts actifs</div>
-        <div class="value" id="activeDl">—</div>
-      </div>
-      <div class="card">
-        <div class="label">Fichiers terminés</div>
-        <div class="value" id="totalFiles">—</div>
-      </div>
-    </div>
-
-    <!-- Connection status banner -->
-    <div class="conn-banner" id="connBanner">
-      <div class="conn-box red" id="connEd2k">
-        <div class="conn-dot"></div>
-        <div>
-          <div class="conn-label">ED2K</div>
-          <div class="conn-value" id="connEd2kValue">Chargement...</div>
-          <div class="conn-detail" id="connEd2kDetail"></div>
-        </div>
-      </div>
-      <div class="conn-box red" id="connKad">
-        <div class="conn-dot"></div>
-        <div>
-          <div class="conn-label">Kad</div>
-          <div class="conn-value" id="connKadValue">Chargement...</div>
-          <div class="conn-detail" id="connKadDetail"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Disk usage -->
-    <div class="cards">
-      <div class="card disk-card">
-        <div class="label">💾 Disque — Incoming</div>
-        <div class="value" id="diskInFree">—<span class="unit">Go libre</span></div>
-        <div class="disk-bar">
-          <div class="pbar"><div class="fill disk" id="diskInBar" style="width:0%"></div></div>
-          <div class="disk-label"><span id="diskInUsed">—</span><span id="diskInTotal">—</span></div>
-        </div>
-      </div>
-      <div class="card disk-card">
-        <div class="label">💾 Disque — Temp</div>
-        <div class="value" id="diskTmpFree">—<span class="unit">Go libre</span></div>
-        <div class="disk-bar">
-          <div class="pbar"><div class="fill disk" id="diskTmpBar" style="width:0%"></div></div>
-          <div class="disk-label"><span id="diskTmpUsed">—</span><span id="diskTmpTotal">—</span></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Stats history chart -->
-    <div class="card" style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div class="label">📈 Historique transferts</div>
-        <select id="statsRange" onchange="loadStatsChart()" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text2);font-size:.78em">
-          <option value="7">7 jours</option>
-          <option value="14">14 jours</option>
-          <option value="30" selected>30 jours</option>
-        </select>
-      </div>
-      <div id="statsBarChart" style="display:flex;align-items:flex-end;gap:3px;height:130px"></div>
-      <div id="statsLabels" style="display:flex;gap:3px;font-size:.6em;color:var(--text3);margin-top:4px;overflow:hidden"></div>
-      <div style="display:flex;gap:16px;margin-top:8px;font-size:.78em;color:var(--text3)">
-        <span style="color:var(--accent)">■ Téléchargement</span>
-        <span style="color:var(--green)">■ Upload</span>
-        <span id="statsTotalInfo"></span>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:12px">
-      <div class="label" style="margin-bottom:8px">📡 Détails connexion</div>
-      <pre id="rawStatus" style="font-size:.8em;color:var(--text2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow:auto"></pre>
-    </div>
-
-    <!-- Stats history chart -->
-    <!-- Stats history chart -->
-    <div class="card" style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <div class="label">📈 Historique transferts (7 jours)</div>
-        <button class="btn btn-ghost btn-sm" onclick="loadStatsChart()" style="padding:3px 8px;font-size:.72em">🔄</button>
-      </div>
-      <div id="statsChart" style="height:140px;position:relative"></div>
-      <div style="font-size:.75em;color:var(--text3);margin-top:6px;display:flex;gap:16px">
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#6366f1;display:inline-block"></span> DL: <span id="statsTotalDl">—</span></span>
-        <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#22c55e;display:inline-block"></span> UL: <span id="statsTotalUl">—</span></span>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="connectED2K()">🔌 Reconnecter ED2K</button>
-      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect?target=kad')">🔌 Reconnecter Kad</button>
-      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/organize')">📂 Organiser fichiers</button>
-    </div>
-    <div id="connectResult" class="msg" style="margin-top:8px"></div>
-  </div>
-
-  <!-- ══════════════════════════════════════════ -->
-  <!-- TAB: Search                                -->
-  <!-- ══════════════════════════════════════════ -->
-  <div class="panel" id="panel-search">
-    <div class="search-box">
-      <input type="text" id="searchQuery" placeholder="Rechercher sur ED2K / Kad..."
-       onkeydown="if(event.key==='Enter')doSearch()" oninput="showSearchSuggestions(this.value)">
-      <select id="searchType">
-        <option value="kad">Kad</option>
-        <option value="global">Tous serveurs</option>
-        <option value="local">Serveur local</option>
-      </select>
-      <button class="btn btn-primary" onclick="doSearch()">🔍 Chercher</button>
-      <span class="kbd" title="Raccourci clavier">Ctrl+K</span>
-    </div>
-
-    <!-- Search history suggestions -->
-    <div id="searchSuggestions" style="display:none;margin-bottom:12px">
-      <div style="font-size:.78em;color:var(--text3);margin-bottom:4px">Recherches récentes :</div>
-      <div id="suggestionsInner" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-    </div>
-
-    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-sm" onclick="refreshResults()">🔄 Rafraîchir résultats</button>
-      <button class="btn btn-ghost btn-sm" onclick="saveCurrentSearch()">💾 Sauver cette recherche</button>
-      <button class="btn btn-ghost btn-sm" onclick="toggleFavorites()">⭐ Favoris <span id="favCount" class="tab-badge" style="display:none">0</span></button>
-    </div>
-
-    <div class="card" style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-        <div class="label">🧠 Recherches sauvegardées</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleSavedSearches(true)">☑ Affichées</button>
-          <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleSavedSearches(false)">☐ Désélectionner</button>
-          <button class="btn btn-ghost btn-sm" onclick="removeSelectedSavedSearches()" data-requires-write="1">✕ Suppr sélection</button>
-          <button class="btn btn-ghost btn-sm" onclick="loadSavedSearches()">🔄 Rafraîchir</button>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 180px;gap:8px;align-items:end;margin-bottom:10px">
-        <div>
-          <div class="label" style="margin-bottom:4px">Filtre</div>
-          <input type="text" id="savedSearchesFilter" placeholder="nom ou requête" oninput="applySavedSearchFilters()">
-        </div>
-        <div>
-          <div class="label" style="margin-bottom:4px">Tri</div>
-          <select id="savedSearchesSort" onchange="applySavedSearchFilters()">
-            <option value="recent_desc">Dernière exécution ↓</option>
-            <option value="created_desc">Création ↓</option>
-            <option value="runs_desc">Exécutions ↓</option>
-            <option value="label_asc">Label A→Z</option>
-          </select>
-        </div>
-      </div>
-      <div id="savedSearchesInfo" style="font-size:.76em;color:var(--text3);margin-bottom:8px">Aucune recherche sauvegardée</div>
-      <div id="savedSearchesList"><div class="empty" style="padding:18px">Aucune recherche sauvegardée</div></div>
-    </div>
-
-    <div class="card" style="margin-bottom:12px;padding:12px">
-      <div style="display:grid;grid-template-columns:2fr 120px 120px 160px;gap:8px;align-items:end">
-        <div>
-          <div class="label" style="margin-bottom:4px">Filtre nom</div>
-          <input type="text" id="resultNameFilter" placeholder="inclure / exclure avec -mot" oninput="applyResultFilters()">
-        </div>
-        <div>
-          <div class="label" style="margin-bottom:4px">Extension</div>
-          <input type="text" id="resultExtFilter" placeholder="mkv" oninput="applyResultFilters()">
-        </div>
-        <div>
-          <div class="label" style="margin-bottom:4px">Sources min</div>
-          <input type="number" id="resultMinSources" min="0" value="0" oninput="applyResultFilters()">
-        </div>
-        <div>
-          <div class="label" style="margin-bottom:4px">Tri</div>
-          <select id="resultSort" onchange="applyResultFilters()">
-            <option value="sources_desc">Sources ↓</option>
-            <option value="sources_asc">Sources ↑</option>
-            <option value="size_desc">Taille ↓</option>
-            <option value="size_asc">Taille ↑</option>
-            <option value="name_asc">Nom A→Z</option>
-            <option value="name_desc">Nom Z→A</option>
-          </select>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
-        <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleResults(true)">☑ Tout sélectionner</button>
-        <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleResults(false)">☐ Tout désélectionner</button>
-        <button class="btn btn-primary btn-sm" onclick="bulkDownloadSelected(this)">⬇️ Télécharger la sélection</button>
-        <button class="btn btn-ghost btn-sm" onclick="openDownloadsTab()">📂 Voir transferts</button>
-        <span id="resultFiltersInfo" style="font-size:.76em;color:var(--text3);margin-left:auto">Aucun résultat</span>
-      </div>
-    </div>
-
-    <div id="searchMsg" class="msg info">
-      <div class="spinner"></div> Recherche en cours...
-    </div>
-
-    <div id="searchDownloadReport" class="card" style="display:none;margin:12px 0;padding:12px;border:1px solid var(--border)"></div>
-
-    <!-- Favorites panel (hidden by default) -->
-    <div id="favoritesPanel" style="display:none;margin-bottom:16px">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-          <div class="label">⭐ Favoris sauvegardés</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleFavorites(true)">☑ Affichés</button>
-            <button class="btn btn-ghost btn-sm" onclick="toggleSelectVisibleFavorites(false)">☐ Désélectionner</button>
-            <button class="btn btn-primary btn-sm" onclick="downloadSelectedFavorites(this)" data-requires-write="1">⬇️ Télécharger sélection</button>
-            <button class="btn btn-ghost btn-sm" onclick="removeSelectedFavorites()" data-requires-write="1">✕ Suppr sélection</button>
-            <button class="btn btn-ghost btn-sm" onclick="downloadAllFavorites(this)" data-requires-write="1">📦 Tout télécharger</button>
-          </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 170px 170px;gap:8px;align-items:end;margin-bottom:10px">
-          <div>
-            <div class="label" style="margin-bottom:4px">Filtre nom / requête</div>
-            <input type="text" id="favoritesNameFilter" placeholder="nom, query, type" oninput="applyFavoriteFilters()">
-          </div>
-          <div>
-            <div class="label" style="margin-bottom:4px">Type</div>
-            <select id="favoritesTypeFilter" onchange="applyFavoriteFilters()">
-              <option value="all">Tous</option>
-              <option value="search_result">Recherche</option>
-              <option value="ed2k_link">Lien ED2K</option>
-            </select>
-          </div>
-          <div>
-            <div class="label" style="margin-bottom:4px">Tri</div>
-            <select id="favoritesSort" onchange="applyFavoriteFilters()">
-              <option value="recent_desc">Ajout ↓</option>
-              <option value="name_asc">Nom A→Z</option>
-              <option value="sources_desc">Sources ↓</option>
-              <option value="size_desc">Taille ↓</option>
-            </select>
-          </div>
-        </div>
-        <div id="favoritesInfo" style="font-size:.76em;color:var(--text3);margin-bottom:8px">Aucun favori</div>
-        <div id="favoritesDownloadReport" class="card" style="display:none;margin-bottom:12px;padding:12px;border:1px solid var(--border)"></div>
-        <div id="favoritesList"><div class="empty">Aucun favori</div></div>
-      </div>
-    </div>
-
-    <div id="searchResults">
-      <div class="empty">Lance une recherche pour trouver des fichiers</div>
-    </div>
-
-    <hr style="border-color:var(--border);margin:24px 0 16px">
-    <div style="font-size:.76em;color:var(--text3)">💡 Tu peux aussi ajouter des liens ED2K directement depuis l'onglet Transferts.</div>
   </div>
 
   <!-- ══════════════════════════════════════════ -->
@@ -1046,7 +779,6 @@ function switchTab(tabName, opts = {}) {
   if (tabName === 'servers') loadServers();
   if (tabName === 'files') loadFiles();
   if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); loadStallTimeout(); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
-  if (tabName === 'search') { loadSearchHistory(); loadFavoritesCount(); loadSavedSearches(); }
 }
 
 // ── Tab navigation ──
@@ -1153,14 +885,6 @@ function renderSparkline(containerId, data, color) {
   </svg>`;
 }
 
-// ── Keyboard shortcut: Ctrl+K → focus search ──
-document.addEventListener('keydown', function(e) {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-    e.preventDefault();
-    switchTab('search');
-    document.getElementById('searchQuery').focus();
-  }
-});
 
 // ── Status / Monitoring ──
 async function loadStatus(force = false) {
@@ -3257,8 +2981,6 @@ function restartAutoRefresh() {
 
 function bindUiStatePersistence() {
   const ids = [
-    'searchQuery', 'searchType',
-    'resultNameFilter', 'resultExtFilter', 'resultMinSources', 'resultSort',
     'downloadNameFilter', 'downloadStatusFilter', 'downloadIssuePreset', 'downloadMinSizeMb', 'downloadMaxSizeMb', 'downloadMinSources', 'downloadMinSpeed', 'downloadOnlySelected', 'downloadSort',
     'logNameSelect', 'logLevelFilter', 'logContains', 'logLinesCount'
   ];
@@ -3280,8 +3002,6 @@ async function init() {
   await loadStatus(true);
   await loadDownloads(true);
   await loadFiles();
-  loadSearchHistory();
-  loadFavoritesCount();
   loadStatsChart();
   loadBookmarklet();
   if (saved.activeTab && saved.activeTab !== 'dashboard') switchTab(saved.activeTab, {load: true, persist: false});

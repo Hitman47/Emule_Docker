@@ -101,15 +101,6 @@ mod_auto_share() {
     fi
 }
 
-mod_file_organizer() {
-    FILE_ORGANIZER_ENABLED=${FILE_ORGANIZER_ENABLED:-"false"}
-    FILE_ORGANIZER_CRON=${FILE_ORGANIZER_CRON:-"*/10 * * * *"}
-    if [ "$FILE_ORGANIZER_ENABLED" = "true" ]; then
-        printf "[MOD] Organisateur de fichiers activé (cron: %s)\n" "$FILE_ORGANIZER_CRON"
-        add_cron_job "$FILE_ORGANIZER_CRON" "file-organizer" "/opt/scripts/file-organizer.sh >> /var/log/file-organizer.log 2>&1"
-    fi
-}
-
 mod_server_update() {
     SERVER_UPDATE_ENABLED=${SERVER_UPDATE_ENABLED:-"false"}
     SERVER_UPDATE_CRON=${SERVER_UPDATE_CRON:-"0 4 * * *"}
@@ -266,11 +257,6 @@ for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups" "/downloads"
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
-if [ "${FILE_ORGANIZER_ENABLED:-false}" = "true" ]; then
-    for subdir in Video Audio Images Documents Archives Software Other; do
-        mkdir -p "${AMULE_INCOMING}/${subdir}"
-    done
-fi
 
 if [ -z "${GUI_PWD:-}" ]; then
     AMULE_GUI_PWD=$(pwgen -s 14)
@@ -611,8 +597,10 @@ else
     printf "  [✓] Paths already correct\n"
 fi
 
-# Migrate existing files from old paths if they exist
-for OLD_DIR in /incoming /temp; do
+# Migrate existing files from old paths if they exist (once only)
+MIGRATE_MARKER="/downloads/.migrated"
+if [ ! -f "$MIGRATE_MARKER" ]; then
+  for OLD_DIR in /incoming /temp; do
     if [ -d "$OLD_DIR" ] && [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ]; then
         case "$OLD_DIR" in
             /incoming) TARGET="$AMULE_INCOMING" ;;
@@ -624,7 +612,12 @@ for OLD_DIR in /incoming /temp; do
             cp -an "$OLD_DIR"/* "$TARGET"/ 2>/dev/null || true
         fi
     fi
-done
+  done
+  touch "$MIGRATE_MARKER"
+  printf "  [✓] Migration marker set\n"
+else
+  printf "  [✓] Already migrated (marker found)\n"
+fi
 
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 SRVLIST_VAL=$(grep '^Serverlist=' "$AMULE_CONF" | head -1 | cut -d= -f2)
@@ -663,7 +656,6 @@ reset_cron_file
 mod_auto_restart
 mod_fix_kad_graph
 mod_fix_kad_bootstrap
-mod_file_organizer
 mod_server_update
 mod_backup
 mod_kad_monitor

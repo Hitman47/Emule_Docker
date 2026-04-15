@@ -708,7 +708,7 @@ def import_server_sources(sources, reconnect=True):
     }
 
 
-def _exec_amulecmd(command, password, timeout=15):
+def _exec_amulecmd(command, password, timeout=30):
     """Low-level amulecmd execution with a specific password."""
     try:
         cmd = ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", password, "-c", command]
@@ -762,7 +762,7 @@ def _clean_amulecmd_output(output):
     return "\n".join(clean).strip()
 
 
-def run_amulecmd(command, timeout=15):
+def run_amulecmd(command, timeout=30):
     """Execute amulecmd with auto-detection of password mode.
 
     Tries: plain password → computed hash → hash from amule.conf.
@@ -3187,7 +3187,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def send_json(self, data, status=200):
-        body = json.dumps(data, ensure_ascii=False).encode()
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8', errors='replace')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', len(body))
@@ -3485,17 +3485,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json(payload)
 
-        elif path == "/api/organize":
-            blocked = guard_write_action(self, "organize")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            try:
-                subprocess.run(["/opt/scripts/file-organizer.sh"], capture_output=True, timeout=30)
-                cache_clear("files")
-                self.send_json({"ok": True})
-            except Exception as e:
-                self.send_json({"error": str(e)}, 500)
 
         elif path == "/api/settings":
             settings = load_settings()
@@ -3541,8 +3530,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             contains = qs.get("contains", [""])[0]
             lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
-                          "server-update": "/var/log/server-update.log", "file-organizer": "/var/log/file-organizer.log",
-                          "backup": "/var/log/backup.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
+                          "server-update": "/var/log/server-update.log", "backup": "/var/log/backup.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
                           "connectivity": "/var/log/amule-diag/connectivity.log",
                           "port-forward": "/var/log/amule-diag/port-forward.log",
                           "completions": "/var/log/amule-diag/completions.log",
