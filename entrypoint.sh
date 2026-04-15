@@ -22,10 +22,10 @@ IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
 CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
-# ── Performance tuning (ZimaBoard 832 optimized) ──
-MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-500}
-MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-500}
-MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-40}
+# ── Performance tuning (Low ID optimized) ──
+MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-800}
+MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-800}
+MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-60}
 DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
@@ -145,6 +145,14 @@ mod_stall_detector() {
 }
 
 # ═══════════════════════════════════════════
+# NEW: Source Hunter — aggressive source finding for Low ID
+# ═══════════════════════════════════════════
+mod_source_hunter() {
+    printf "[MOD] Source Hunter activé (toutes les 10 min)\n"
+    add_cron_job "*/10 * * * *" "source-hunter" "/opt/scripts/source-hunter.sh >> /var/log/amule-diag/source-hunter.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
 # NEW: Connectivity diagnostic logger (every 3min)
 # ═══════════════════════════════════════════
 mod_connectivity_diag() {
@@ -159,6 +167,14 @@ mod_connectivity_diag() {
 mod_port_forward() {
     printf "[MOD] VPN port forward detection activé (toutes les 10 min)\n"
     add_cron_job "*/10 * * * *" "port-forward" "/opt/scripts/port-forward-detect.sh >> /var/log/amule-diag/port-forward.log 2>&1"
+}
+
+# ═══════════════════════════════════════════
+# NEW: Source Boost — Low ID download optimizer
+# ═══════════════════════════════════════════
+mod_source_boost() {
+    printf "[MOD] Source Boost activé (toutes les 10 min)\n"
+    add_cron_job "*/10 * * * *" "source-boost" "/opt/scripts/source-boost.sh 2>&1"
 }
 
 # ═══════════════════════════════════════════
@@ -562,6 +578,32 @@ printf "  FileBufferSizePref=524288 ServerKeepAlive=300 UseSrcSeeds=1\n"
 sed -i 's/^CreateSparseFiles=1/CreateSparseFiles=0/' "$AMULE_CONF" 2>/dev/null
 printf "  CreateSparseFiles=0 (overlay2 fix)\n"
 
+# ── FORCE-FIX: Low ID optimization — maximize source exchange ──
+printf "━━━ Low ID source optimization ━━━\n"
+# Reconnect aggressively when disconnected
+sed -i 's/^Reconnect=0/Reconnect=1/' "$AMULE_CONF" 2>/dev/null
+# Accept sources from servers and other clients
+sed -i 's/^AddServerListFromServer=0/AddServerListFromServer=1/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^AddServerListFromClient=0/AddServerListFromClient=1/' "$AMULE_CONF" 2>/dev/null
+# Smart Low ID — let aMule handle Low ID reconnect logic
+sed -i 's/^SmartIdCheck=0/SmartIdCheck=1/' "$AMULE_CONF" 2>/dev/null
+# Source exchange: accept sources from downloading clients (critical for Low ID)
+# ICH = Intelligent Corruption Handling
+sed -i 's/^ICH=0/ICH=1/' "$AMULE_CONF" 2>/dev/null
+sed -i 's/^AICHTrust=0/AICHTrust=1/' "$AMULE_CONF" 2>/dev/null
+# Start next file when one completes (keep connections busy)
+sed -i 's/^StartNextFile=0/StartNextFile=1/' "$AMULE_CONF" 2>/dev/null
+# Use DAP (Download Auto-Priority) — focuses on files with most sources
+sed -i 's/^DAPPref=0/DAPPref=1/' "$AMULE_CONF" 2>/dev/null
+# Upload Auto-Priority — share more of what others need = better queue position
+sed -i 's/^UAPPref=0/UAPPref=1/' "$AMULE_CONF" 2>/dev/null
+# Keep online signature updated (helps with source exchange)
+sed -i 's/^OnlineSignature=0/OnlineSignature=1/' "$AMULE_CONF" 2>/dev/null
+# Higher connection rate for Low ID (need to try more peers)
+sed -i "s/^MaxConnectionsPerFiveSeconds=.*/MaxConnectionsPerFiveSeconds=${MAX_CONN_5SEC}/" "$AMULE_CONF" 2>/dev/null
+printf "  Reconnect=1 SmartIdCheck=1 ICH=1 AICH=1 StartNextFile=1\n"
+printf "  DAPPref=1 UAPPref=1 OnlineSignature=1 MaxConn5s=%s\n" "$MAX_CONN_5SEC"
+
 # ── FORCE-FIX: Enable download completion event ──
 if grep -q '^CoreEnabled=0' "$AMULE_CONF" 2>/dev/null; then
     # Replace the DownloadCompleted section
@@ -661,8 +703,10 @@ mod_backup
 mod_kad_monitor
 mod_source_scanner
 mod_stall_detector
+mod_source_hunter
 mod_connectivity_diag
 mod_port_forward
+mod_source_boost
 init_settings
 
 if [ "$CRON_HAS_JOBS" -eq 1 ]; then

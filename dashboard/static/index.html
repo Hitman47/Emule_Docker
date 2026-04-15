@@ -313,6 +313,8 @@ tr:hover{background:var(--bg3)}
       <button class="btn btn-ghost btn-sm" onclick="loadDownloads(true)">🔄 Rafraîchir</button>
       <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)" data-requires-write="1">▶ Tout reprendre</button>
       <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)" data-requires-write="1">⏸ Tout pauser</button>
+      <button class="btn btn-ghost btn-sm" onclick="triggerSourceBoost(this)" data-requires-write="1" title="Relance la recherche de sources, rotation serveur, cycle pause/resume">🚀 Boost sources</button>
+      <span id="boostStatus" style="font-size:.72em;color:var(--text3)"></span>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
     </div>
 
@@ -663,7 +665,7 @@ tr:hover{background:var(--bg3)}
         <button class="btn btn-ghost btn-sm" onclick="setLogName('kad-monitor')">Kad Monitor</button>
         <button class="btn btn-ghost btn-sm" onclick="setLogName('source-scanner')">Source Scanner</button>
         <button class="btn btn-ghost btn-sm" onclick="setLogName('server-update')">MAJ Serveurs</button>
-        <button class="btn btn-ghost btn-sm" onclick="setLogName('file-organizer')">Organiseur</button>
+        <button class="btn btn-ghost btn-sm" onclick="setLogName('source-boost')">Source Boost</button>
         <button class="btn btn-ghost btn-sm" onclick="setLogName('backup')">Backup</button>
         <button class="btn btn-ghost btn-sm" onclick="setLogName('stall-detector')">Stall Detector</button>
       </div>
@@ -672,7 +674,7 @@ tr:hover{background:var(--bg3)}
           <option value="kad-monitor">Kad Monitor</option>
           <option value="source-scanner">Source Scanner</option>
           <option value="server-update">MAJ Serveurs</option>
-          <option value="file-organizer">Organiseur</option>
+          <option value="source-boost">Source Boost</option>
           <option value="backup">Backup</option>
           <option value="stall-detector">Stall Detector</option>
         </select>
@@ -905,7 +907,7 @@ function switchTab(tabName, opts = {}) {
   panel.classList.add('active');
   if (persist) persistUiState({activeTab: tabName});
   if (!load) return;
-  if (tabName === 'downloads') { loadDownloads(true); loadClients(true); }
+  if (tabName === 'downloads') { loadDownloads(true); loadClients(true); loadBoostStatus(); }
   if (tabName === 'servers') loadServers();
   if (tabName === 'files') loadFiles();
   if (tabName === 'settings') { loadSettings(); loadAppConfig(); loadBookmarklet(); loadActionHistory(true); loadStallTimeout(); runDebug(true); showLog(window._currentLogName || 'kad-monitor'); }
@@ -2353,6 +2355,37 @@ function showSearchSuggestions(val) {
   } else {
     box.style.display = 'none';
   }
+}
+
+// ── Source Boost ──
+async function triggerSourceBoost(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '🚀 Boost en cours...'; }
+  const d = await api('/api/source_boost');
+  if (d?.ok) {
+    showToast('ok', 'Source Boost lancé — rotation serveur, recherche Kad, refresh sources');
+  } else {
+    showToast('err', 'Erreur lors du boost');
+  }
+  if (btn) { setTimeout(() => { btn.disabled = false; btn.textContent = '🚀 Boost sources'; }, 8000); }
+  // Refresh status after a delay
+  setTimeout(loadBoostStatus, 10000);
+}
+
+async function loadBoostStatus() {
+  const el = document.getElementById('boostStatus');
+  if (!el) return;
+  const d = await api('/api/source_boost/status');
+  if (!d?.last_run) { el.textContent = ''; return; }
+  const lr = d.last_run;
+  const ago = Math.round((Date.now() / 1000) - (lr.ts || 0));
+  const agoText = ago < 120 ? ago + 's' : Math.round(ago / 60) + 'min';
+  const parts = [];
+  if (lr.stalled) parts.push(lr.stalled + ' bloqué(s)');
+  if (lr.zero_sources) parts.push(lr.zero_sources + ' sans sources');
+  const acts = lr.actions || {};
+  if (acts.auto_paused) parts.push(acts.auto_paused + ' auto-pausé(s)');
+  if (acts.auto_resumed) parts.push(acts.auto_resumed + ' repris');
+  el.textContent = 'Boost: ' + agoText + ' ago' + (parts.length ? ' · ' + parts.join(', ') : '');
 }
 
 // ── Connected Clients Panel ──

@@ -3601,6 +3601,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             threading.Thread(target=do_scan, daemon=True).start()
             self.send_json({"ok": True, "message": "Scan lancé en arrière-plan"})
 
+        elif path == "/api/source_boost":
+            blocked = guard_write_action(self, "source_boost")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            # Read last run status
+            last_run = None
+            try:
+                boost_status_path = os.path.join(AMULE_HOME, ".source-boost", "last-run.json")
+                with open(boost_status_path, "r") as _f:
+                    last_run = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            # Trigger boost in background
+            def do_boost():
+                try:
+                    subprocess.run(["/opt/scripts/source-boost.sh"], capture_output=True, timeout=180)
+                except Exception:
+                    pass
+                cache_clear("status", "downloads", "clients")
+            threading.Thread(target=do_boost, daemon=True).start()
+            self.send_json({"ok": True, "message": "Source Boost lancé en arrière-plan", "last_run": last_run})
+
+        elif path == "/api/source_boost/status":
+            last_run = None
+            try:
+                boost_status_path = os.path.join(AMULE_HOME, ".source-boost", "last-run.json")
+                with open(boost_status_path, "r") as _f:
+                    last_run = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            self.send_json({"ok": True, "last_run": last_run})
+
         elif path == "/api/logs":
             if not get_dashboard_config().get("debug_mode", True):
                 self.send_json({"ok": False, "error": "Mode debug désactivé"}, 403)
@@ -3610,7 +3643,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             contains = qs.get("contains", [""])[0]
             lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
-                          "server-update": "/var/log/server-update.log", "backup": "/var/log/backup.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
+                          "server-update": "/var/log/server-update.log", "backup": "/var/log/backup.log", "source-boost": "/var/log/amule-diag/source-boost.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
+                          "source-hunter": "/var/log/amule-diag/source-hunter.log",
                           "connectivity": "/var/log/amule-diag/connectivity.log",
                           "port-forward": "/var/log/amule-diag/port-forward.log",
                           "completions": "/var/log/amule-diag/completions.log",
