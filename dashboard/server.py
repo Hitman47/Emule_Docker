@@ -1002,22 +1002,31 @@ def parse_downloads(raw):
         attr = re.sub(r'^>\s*', '', stripped)
         al = attr.lower()
 
+        # ── Speed MUST be parsed FIRST to avoid '47.81 KB/s' being read as size '47.81 KB' ──
+        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bo]|bytes?|octets?)\s*/s', attr, re.I)
+        is_speed_line = bool(m_spd)
+        if m_spd:
+            current["speed"] = speed_to_kb(m_spd.group(1), m_spd.group(2))
+
         m_pct = re.search(r'([\d.,]+)\s*%', attr)
         if m_pct:
             current["progress"] = parse_number_loose(m_pct.group(1), current["progress"])
 
-        m_frac = re.search(r'([\d.,]+)\s*(?:[KMGT]?i?[Bo])?\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
-        if m_frac:
-            total_value = parse_number_loose(m_frac.group(2))
-            current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
-            if current["progress"] == 0:
-                done = parse_number_loose(m_frac.group(1))
-                if done is not None and total_value and total_value > 0:
-                    current["progress"] = round(done / total_value * 100, 1)
-        elif not current["size"]:
-            m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bo])', attr, re.I)
-            if m_size:
-                current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
+        # ── Size parsing — SKIP if this line is a speed line ──
+        if not is_speed_line:
+            m_frac = re.search(r'([\d.,]+)\s*(?:[KMGT]?i?[Bo])?\s*/\s*([\d.,]+)\s*([KMGT]?i?[Bo])', attr, re.I)
+            if m_frac:
+                total_value = parse_number_loose(m_frac.group(2))
+                current["size"] = f"{str(m_frac.group(2)).replace(',', '.')} {m_frac.group(3)}"
+                if current["progress"] == 0:
+                    done = parse_number_loose(m_frac.group(1))
+                    if done is not None and total_value and total_value > 0:
+                        current["progress"] = round(done / total_value * 100, 1)
+            elif not current["size"]:
+                # Negative lookahead: reject '47.81 KB/s' patterns
+                m_size = re.search(r'(?:size\s*:\s*)?([\d.,]+)\s*([KMGT]i?[Bo])(?!\s*/)', attr, re.I)
+                if m_size:
+                    current["size"] = f"{str(m_size.group(1)).replace(',', '.')} {m_size.group(2)}"
 
         m_src = re.search(r'(\d+)\s*(?:source|src)', al)
         if m_src:
@@ -1026,10 +1035,6 @@ def parse_downloads(raw):
             m_src2 = re.search(r'sources?\s*:?\s*(\d+)', al)
             if m_src2:
                 current["sources"] = int(m_src2.group(1))
-
-        m_spd = re.search(r'([\d.,]+)\s*([KMG]?i?[Bo]|bytes?|octets?)\s*/s', attr, re.I)
-        if m_spd:
-            current["speed"] = speed_to_kb(m_spd.group(1), m_spd.group(2))
 
         status, detail = classify_download_status(attr)
         if status:

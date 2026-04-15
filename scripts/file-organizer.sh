@@ -11,7 +11,7 @@ is_video() { echo "$1" | grep -qiE '\.(mkv|avi|mp4|mov|wmv|flv|m4v|ts|mpg|mpeg|w
 is_audio() { echo "$1" | grep -qiE '\.(mp3|flac|ogg|wav|aac|wma|m4a|opus|ape|alac)$'; }
 is_image() { echo "$1" | grep -qiE '\.(jpg|jpeg|png|gif|bmp|svg|webp|tiff|tif|ico|raw)$'; }
 is_document() { echo "$1" | grep -qiE '\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|epub|mobi|odt|ods|rtf|csv)$'; }
-is_archive() { echo "$1" | grep -qiE '\.(zip|rar|7z|tar|gz|bz2|xz|tgz|cab|ace)$'; }
+is_archive() { echo "$1" | grep -qiE '\.(zip|rar|7z|tar|gz|bz2|xz|tgz|cab|ace|cbz|cbr)$'; }
 is_software() { echo "$1" | grep -qiE '\.(iso|img|exe|msi|dmg|deb|rpm|apk|app|bin|nrg)$'; }
 
 get_category() {
