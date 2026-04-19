@@ -18,8 +18,17 @@ AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
 LOG_PREFIX="[SRC-BOOST]"
 LOG_FILE="/var/log/amule-diag/source-boost.log"
 STATE_DIR="${AMULE_HOME}/.source-boost"
+SOURCE_BOOST_AUTO_PAUSE_ENABLED="${SOURCE_BOOST_AUTO_PAUSE_ENABLED:-false}"
+SOURCE_BOOST_ZERO_SRC_TIMEOUT="${SOURCE_BOOST_ZERO_SRC_TIMEOUT:-3600}"
 
 mkdir -p /var/log/amule-diag "$STATE_DIR"
+
+is_true() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 log() {
     MSG="$(date '+%Y-%m-%d %H:%M:%S') $LOG_PREFIX $1"
@@ -288,53 +297,58 @@ fi
 
 # ═══════════════════════════════════════
 # PHASE 4: Smart focus
-# Auto-pause downloads with 0 sources for
-# 60+ min to free up connection slots for
-# downloads that actually have sources
+# Auto-pause downloads with 0 sources only
+# if explicitly enabled. Default = OFF,
+# because this is too aggressive for eD2k.
 # ═══════════════════════════════════════
-ZERO_SRC_TIMEOUT=3600  # 60 min with 0 sources → auto-pause
+ZERO_SRC_TIMEOUT="${SOURCE_BOOST_ZERO_SRC_TIMEOUT}"
 
 PAUSED_BY_BOOST=0
 RESUMED_BY_BOOST=0
-while IFS='|' read -r hash name pct src status; do
-    TRACKER="${STATE_DIR}/zero-src-${hash}"
-    case "$status" in
-        waiting|getting_sources|connecting|unknown)
-            if [ "${src:-0}" -eq 0 ]; then
-                # Track how long this has had 0 sources
-                if [ ! -f "$TRACKER" ]; then
-                    date +%s > "$TRACKER"
-                else
-                    FIRST_SEEN=$(cat "$TRACKER" 2>/dev/null || echo 0)
-                    NOW=$(date +%s)
-                    ELAPSED=$((NOW - FIRST_SEEN))
-                    if [ "$ELAPSED" -gt "$ZERO_SRC_TIMEOUT" ]; then
-                        log "Phase 4: Auto-pause $hash (0 sources for ${ELAPSED}s) — $(echo "$name" | head -c 50)"
-                        amule_cmd "pause $hash" >/dev/null 2>&1
-                        PAUSED_BY_BOOST=$((PAUSED_BY_BOOST + 1))
+if is_true "$SOURCE_BOOST_AUTO_PAUSE_ENABLED"; then
+    while IFS='|' read -r hash name pct src status; do
+        TRACKER="${STATE_DIR}/zero-src-${hash}"
+        case "$status" in
+            waiting|getting_sources|connecting|unknown)
+                if [ "${src:-0}" -eq 0 ]; then
+                    # Track how long this has had 0 sources
+                    if [ ! -f "$TRACKER" ]; then
+                        date +%s > "$TRACKER"
+                    else
+                        FIRST_SEEN=$(cat "$TRACKER" 2>/dev/null || echo 0)
+                        NOW=$(date +%s)
+                        ELAPSED=$((NOW - FIRST_SEEN))
+                        if [ "$ELAPSED" -gt "$ZERO_SRC_TIMEOUT" ]; then
+                            log "Phase 4: Auto-pause $hash (0 sources for ${ELAPSED}s) — $(echo "$name" | head -c 50)"
+                            amule_cmd "pause $hash" >/dev/null 2>&1
+                            PAUSED_BY_BOOST=$((PAUSED_BY_BOOST + 1))
+                        fi
                     fi
+                else
+                    # Has sources now — clear tracker
+                    rm -f "$TRACKER"
                 fi
-            else
-                # Has sources now — clear tracker
-                rm -f "$TRACKER"
-            fi
-            ;;
-        paused)
-            # If this was paused by us and now has sources, resume it
-            if [ -f "$TRACKER" ] && [ "${src:-0}" -gt 0 ]; then
-                log "Phase 4: Auto-resume $hash (sources found!) — $(echo "$name" | head -c 50)"
-                amule_cmd "resume $hash" >/dev/null 2>&1
-                rm -f "$TRACKER"
-                RESUMED_BY_BOOST=$((RESUMED_BY_BOOST + 1))
-            fi
-            ;;
-    esac
-done < "$PARSE_FILE"
+                ;;
+            paused)
+                # If this was paused by us and now has sources, resume it
+                if [ -f "$TRACKER" ] && [ "${src:-0}" -gt 0 ]; then
+                    log "Phase 4: Auto-resume $hash (sources found!) — $(echo "$name" | head -c 50)"
+                    amule_cmd "resume $hash" >/dev/null 2>&1
+                    rm -f "$TRACKER"
+                    RESUMED_BY_BOOST=$((RESUMED_BY_BOOST + 1))
+                fi
+                ;;
+        esac
+    done < "$PARSE_FILE"
 
-if [ "$PAUSED_BY_BOOST" -gt 0 ] || [ "$RESUMED_BY_BOOST" -gt 0 ]; then
-    log "Phase 4: Paused $PAUSED_BY_BOOST (no sources), Resumed $RESUMED_BY_BOOST (sources found)"
+    if [ "$PAUSED_BY_BOOST" -gt 0 ] || [ "$RESUMED_BY_BOOST" -gt 0 ]; then
+        log "Phase 4: Paused $PAUSED_BY_BOOST (no sources), Resumed $RESUMED_BY_BOOST (sources found)"
+    else
+        log "Phase 4: No focus changes needed"
+    fi
 else
-    log "Phase 4: No focus changes needed"
+    rm -f "${STATE_DIR}"/zero-src-*
+    log "Phase 4: Auto-pause disabled (SOURCE_BOOST_AUTO_PAUSE_ENABLED=$SOURCE_BOOST_AUTO_PAUSE_ENABLED)"
 fi
 
 # Cleanup old trackers for downloads that no longer exist

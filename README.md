@@ -89,10 +89,10 @@ ports:
 data/
 ├── amule-config/                  # Config aMule
 │   └── dashboard-settings.json    # Paramètres du dashboard (sources serveurs, etc.)
-├── downloads/                     # Téléchargements terminés (à plat)
-│   └── .amule-temp/               # Fichiers temporaires aMule
-├── backups/                       # Sauvegardes config
-└── logs/                          # Logs du dashboard / scripts
+├── incoming/                      # Téléchargements terminés
+│   ├── Video/  Audio/  Images/  Documents/  Archives/  Software/  Other/
+├── temp/                          # Téléchargements en cours
+└── backups/                       # Sauvegardes config
 ```
 
 ## Variables d'environnement
@@ -104,6 +104,7 @@ data/
 | `DASHBOARD_PWD` | Mot de passe dashboard | = WEBUI_PWD |
 | `DASHBOARD_ENABLED` | Activer le dashboard | `true` |
 | `DASHBOARD_PORT` | Port du dashboard | `8078` |
+| `FILE_ORGANIZER_ENABLED` | Tri auto des fichiers | `true` |
 | `SERVER_UPDATE_ENABLED` | MAJ auto serveurs | `true` |
 | `BACKUP_ENABLED` | Backup auto config | `true` |
 | `MOD_AUTO_RESTART_ENABLED` | Auto-restart aMule | `true` |
@@ -154,8 +155,3 @@ docker restart amule
 
 Basé sur [ngosang/docker-amule](https://github.com/ngosang/docker-amule).
 Sources serveurs : [emule-security.org](https://www.emule-security.org/serverlist/), [peerates.net](https://edk.peerates.net/fr/), [FlyerNet](http://flyernet.fr.st.free.fr/ip_serveurs.php).
-
-### Important : dossier hôte de destination
-
-Si tu laisses `./data/downloads`, Docker créera ce dossier **dans le dossier du projet**.
-Si tu veux écrire directement dans un dossier existant de ton NAS, définis `DOWNLOADS_HOST_DIR` vers ce chemin hôte au lieu d'utiliser le chemin relatif par défaut.

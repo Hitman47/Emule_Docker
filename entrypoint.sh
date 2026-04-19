@@ -11,8 +11,8 @@ printf "\n"
 # ── Variables ──
 AMULE_UID=${PUID:-1000}
 AMULE_GID=${PGID:-1000}
-AMULE_INCOMING=${INCOMING_DIR:-"/downloads"}
-AMULE_TEMP=${TEMP_DIR:-"/downloads/.amule-temp"}
+AMULE_INCOMING=${INCOMING_DIR:-"/downloads/incoming"}
+AMULE_TEMP=${TEMP_DIR:-"/downloads/temp"}
 AMULE_HOME=/home/amule/.aMule
 AMULE_CONF=${AMULE_HOME}/amule.conf
 REMOTE_CONF=${AMULE_HOME}/remote.conf
@@ -77,7 +77,7 @@ mod_fix_kad_bootstrap() {
 
 mod_auto_share() {
     MOD_AUTO_SHARE_ENABLED=${MOD_AUTO_SHARE_ENABLED:-"false"}
-    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/downloads"}
+    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/downloads/incoming"}
     if [ "$MOD_AUTO_SHARE_ENABLED" = "true" ]; then
         printf "[MOD] Auto-share activé: %s\n" "$MOD_AUTO_SHARE_DIRECTORIES"
         SHAREDDIR_CONF="${AMULE_HOME}/shareddir.dat"
@@ -236,6 +236,8 @@ CREDEOF
         export DASHBOARD_PORT
         export DASHBOARD_PWD="${DASHBOARD_PWD:-${WEBUI_PWD:-admin}}"
         export SETTINGS_FILE="${AMULE_HOME}/dashboard-settings.json"
+        export SOURCE_BOOST_AUTO_PAUSE_ENABLED="${SOURCE_BOOST_AUTO_PAUSE_ENABLED:-false}"
+        export SOURCE_BOOST_ZERO_SRC_TIMEOUT="${SOURCE_BOOST_ZERO_SRC_TIMEOUT:-3600}"
         python3 /opt/dashboard/server.py &
         DASHBOARD_PID=$!
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
@@ -439,8 +441,8 @@ CryptoKadUDPKey=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
 PreventSleepWhileDownloading=0
 [UserEvents]
 [UserEvents/DownloadCompleted]
-CoreEnabled=0
-CoreCommand=
+CoreEnabled=1
+CoreCommand=/opt/scripts/on-download-complete.sh "%FILE" "%NAME" "%HASH" "%SIZE"
 GUIEnabled=0
 GUICommand=
 [UserEvents/NewChatSession]
@@ -604,15 +606,18 @@ sed -i "s/^MaxConnectionsPerFiveSeconds=.*/MaxConnectionsPerFiveSeconds=${MAX_CO
 printf "  Reconnect=1 SmartIdCheck=1 ICH=1 AICH=1 StartNextFile=1\n"
 printf "  DAPPref=1 UAPPref=1 OnlineSignature=1 MaxConn5s=%s\n" "$MAX_CONN_5SEC"
 
-# ── FORCE-FIX: Disable download completion hook (no organizer / no post-move logic) ──
-awk '
-    /^\[UserEvents\/DownloadCompleted\]/{sect=1}
-    sect && /^CoreEnabled=/{$0="CoreEnabled=0"}
-    sect && /^CoreCommand=/{$0="CoreCommand="}
-    sect && /^\[/ && !/^\[UserEvents\/DownloadCompleted\]/{sect=0}
-    {print}
-' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
-printf "  UserEvents/DownloadCompleted disabled\n"
+# ── FORCE-FIX: Enable download completion event ──
+if grep -q '^CoreEnabled=0' "$AMULE_CONF" 2>/dev/null; then
+    # Replace the DownloadCompleted section
+    awk '
+        /^\[UserEvents\/DownloadCompleted\]/{sect=1}
+        sect && /^CoreEnabled=/{$0="CoreEnabled=1"; sect_done=1}
+        sect && /^CoreCommand=/{$0="CoreCommand=/opt/scripts/on-download-complete.sh \"%FILE\" \"%NAME\" \"%HASH\" \"%SIZE\""}
+        sect && /^\[/ && !/^\[UserEvents\/DownloadCompleted\]/{sect=0}
+        {print}
+    ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
+    printf "  UserEvents/DownloadCompleted enabled\n"
+fi
 
 # ── FORCE-FIX: TempDir and IncomingDir MUST be on same mount (cross-device rename fix) ──
 printf "━━━ Cross-device rename fix ━━━\n"
@@ -637,13 +642,13 @@ else
 fi
 
 # Migrate existing files from old paths if they exist (once only)
-MIGRATE_MARKER="/downloads/.migrated-flat-layout-v2"
+MIGRATE_MARKER="/downloads/.migrated"
 if [ ! -f "$MIGRATE_MARKER" ]; then
-  for OLD_DIR in /incoming /temp /downloads/incoming /downloads/temp /downloads/downloads; do
+  for OLD_DIR in /incoming /temp; do
     if [ -d "$OLD_DIR" ] && [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ]; then
         case "$OLD_DIR" in
-            /incoming|/downloads/incoming|/downloads/downloads) TARGET="$AMULE_INCOMING" ;;
-            /temp|/downloads/temp) TARGET="$AMULE_TEMP" ;;
+            /incoming) TARGET="$AMULE_INCOMING" ;;
+            /temp)     TARGET="$AMULE_TEMP" ;;
         esac
         if [ "$OLD_DIR" != "$TARGET" ]; then
             printf "  Migrating %s → %s\n" "$OLD_DIR" "$TARGET"

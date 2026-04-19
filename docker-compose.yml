@@ -84,18 +84,23 @@ services:
       - BACKUP_CRON=0 3 * * 0
       - BACKUP_KEEP=4
 
+      # Source Boost
+      # Important: l'auto-pause 0 source est désactivé par défaut,
+      # sinon des téléchargements eD2k légitimes finissent "Paused"
+      # alors qu'ils sont juste en attente de sources.
+      - SOURCE_BOOST_AUTO_PAUSE_ENABLED=false
+      - SOURCE_BOOST_ZERO_SRC_TIMEOUT=3600
+
       # Limites performance ZimaBoard 832
       - AMULE_MAX_CONNECTIONS=500
       - AMULE_MAX_SOURCES_PER_FILE=800
       - AMULE_MAX_CONN_PER_5SEC=60
       - AMULE_DOWNLOAD_CAPACITY=300
       - AMULE_UPLOAD_CAPACITY=80
-      - INCOMING_DIR=/downloads
-      - TEMP_DIR=/downloads/.amule-temp
 
     volumes:
       - ./data/amule-config:/home/amule/.aMule
-      - ${DOWNLOADS_HOST_DIR:-./data/downloads}:/downloads
+      - ./data/downloads:/downloads
       - ./data/backups:/backups
       - ./data/logs:/var/log/amule-diag
 
