@@ -39,8 +39,7 @@ RUN chmod +x /opt/scripts/*.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh \
-    && mkdir -p /home/amule /downloads /temp /backups /var/log/amule-diag \
-    && rm -rf /downloads/incoming /downloads/temp
+    && mkdir -p /home/amule /downloads /downloads/.amule-temp /backups /var/log/amule-diag
 
 WORKDIR /home/amule
 

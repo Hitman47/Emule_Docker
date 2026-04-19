@@ -84,22 +84,18 @@ services:
       - BACKUP_CRON=0 3 * * 0
       - BACKUP_KEEP=4
 
-      # Destination fichiers : à plat dans /downloads, temporaires séparés
-      - DOWNLOADS_DIR=/downloads
-      - INCOMING_DIR=/downloads
-      - TEMP_DIR=/temp
-
       # Limites performance ZimaBoard 832
       - AMULE_MAX_CONNECTIONS=500
       - AMULE_MAX_SOURCES_PER_FILE=800
       - AMULE_MAX_CONN_PER_5SEC=60
       - AMULE_DOWNLOAD_CAPACITY=300
       - AMULE_UPLOAD_CAPACITY=80
+      - INCOMING_DIR=/downloads
+      - TEMP_DIR=/downloads/.amule-temp
 
     volumes:
       - ./data/amule-config:/home/amule/.aMule
-      - ./data/downloads:/downloads
-      - ./data/temp:/temp
+      - ${DOWNLOADS_HOST_DIR:-./data/downloads}:/downloads
       - ./data/backups:/backups
       - ./data/logs:/var/log/amule-diag
 

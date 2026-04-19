@@ -26,8 +26,8 @@ EC_PASSWORD = os.environ.get("AMULE_EC_PASSWORD", "")
 EC_PASSWORD_HASH = os.environ.get("AMULE_EC_PASSWORD_HASH", "")
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "4713"))
 DASHBOARD_PWD = os.environ.get("DASHBOARD_PWD", "admin")
-INCOMING_DIR = os.environ.get("INCOMING_DIR", "/incoming")
-TEMP_DIR = os.environ.get("TEMP_DIR", "/temp")
+INCOMING_DIR = os.environ.get("INCOMING_DIR", "/downloads")
+TEMP_DIR = os.environ.get("TEMP_DIR", "/downloads/.amule-temp")
 
 # Try to load credentials from file (more reliable than env vars)
 AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
@@ -4015,6 +4015,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
         except FileNotFoundError:
             self.send_response(404); self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def serve_login(self):
         html = b"""<!DOCTYPE html>
