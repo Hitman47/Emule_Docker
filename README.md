@@ -1,6 +1,6 @@
 # aMule ZimaBoard Edition
 
-Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur de recherche ED2K intégré, gestion de serveurs multi-sources, tri automatique des fichiers, et intégration VPN Gluetun/NordVPN.
+Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur de recherche ED2K intégré, gestion de serveurs multi-sources et intégration VPN Gluetun/NordVPN.
 
 ## Fonctionnalités
 
@@ -25,7 +25,8 @@ Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur d
 - Bouton de reconnexion manuelle dans les Paramètres
 
 ### Automatisation
-- Tri auto des fichiers par type (Video, Audio, Images, Documents, Archives, Software)
+- Les téléchargements terminés arrivent directement dans le dossier de destination
+- Aucun tri automatique ni création de sous-dossiers imposés par le conteneur
 - Auto-restart aMule (contourne les memory leaks)
 - Backup auto de la config avec rotation
 - Mise à jour auto de l'IP filter (emule-security.org)
@@ -89,9 +90,8 @@ ports:
 data/
 ├── amule-config/                  # Config aMule
 │   └── dashboard-settings.json    # Paramètres du dashboard (sources serveurs, etc.)
-├── incoming/                      # Téléchargements terminés
-│   ├── Video/  Audio/  Images/  Documents/  Archives/  Software/  Other/
-├── temp/                          # Téléchargements en cours
+├── downloads/                     # Téléchargements terminés (directement ici)
+├── temp/                          # Téléchargements incomplets / temporaires
 └── backups/                       # Sauvegardes config
 ```
 
@@ -104,7 +104,9 @@ data/
 | `DASHBOARD_PWD` | Mot de passe dashboard | = WEBUI_PWD |
 | `DASHBOARD_ENABLED` | Activer le dashboard | `true` |
 | `DASHBOARD_PORT` | Port du dashboard | `8078` |
-| `FILE_ORGANIZER_ENABLED` | Tri auto des fichiers | `true` |
+| `DOWNLOADS_DIR` | Racine des téléchargements terminés | `/downloads` |
+| `INCOMING_DIR` | Dossier final des téléchargements terminés | = `DOWNLOADS_DIR` |
+| `TEMP_DIR` | Dossier des fichiers temporaires | `/temp` |
 | `SERVER_UPDATE_ENABLED` | MAJ auto serveurs | `true` |
 | `BACKUP_ENABLED` | Backup auto config | `true` |
 | `MOD_AUTO_RESTART_ENABLED` | Auto-restart aMule | `true` |
@@ -132,11 +134,6 @@ docker exec amule /opt/scripts/kad-monitor.sh
 docker exec amule /opt/scripts/source-scanner.sh
 ```
 
-### Forcer un tri des fichiers
-```bash
-docker exec amule /opt/scripts/file-organizer.sh
-```
-
 ### Voir les logs
 Via le dashboard (onglet Paramètres > Logs) ou :
 ```bash
@@ -155,3 +152,8 @@ docker restart amule
 
 Basé sur [ngosang/docker-amule](https://github.com/ngosang/docker-amule).
 Sources serveurs : [emule-security.org](https://www.emule-security.org/serverlist/), [peerates.net](https://edk.peerates.net/fr/), [FlyerNet](http://flyernet.fr.st.free.fr/ip_serveurs.php).
+
+## Note importante sur les dossiers
+
+Par défaut, les fichiers terminés arrivent directement dans `data/downloads/`.
+Le dossier temporaire est séparé dans `data/temp/`, ce qui évite les arborescences du type `downloads/incoming/...` et les boucles liées à une destination imbriquée.

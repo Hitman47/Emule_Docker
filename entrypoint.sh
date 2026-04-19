@@ -11,8 +11,9 @@ printf "\n"
 # ── Variables ──
 AMULE_UID=${PUID:-1000}
 AMULE_GID=${PGID:-1000}
-AMULE_INCOMING=${INCOMING_DIR:-"/downloads/incoming"}
-AMULE_TEMP=${TEMP_DIR:-"/downloads/temp"}
+DOWNLOADS_DIR=${DOWNLOADS_DIR:-"/downloads"}
+AMULE_INCOMING=${INCOMING_DIR:-"${DOWNLOADS_DIR}"}
+AMULE_TEMP=${TEMP_DIR:-"/temp"}
 AMULE_HOME=/home/amule/.aMule
 AMULE_CONF=${AMULE_HOME}/amule.conf
 REMOTE_CONF=${AMULE_HOME}/remote.conf
@@ -22,6 +23,61 @@ IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
 CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
+path_starts_with() {
+    parent="$1"
+    child="$2"
+    case "${child}/" in
+        "${parent}/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_download_paths() {
+    if [ "$AMULE_INCOMING" = "$AMULE_TEMP" ]; then
+        printf "[PATHS] IncomingDir et TempDir identiques (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP"
+        AMULE_TEMP="/temp"
+    fi
+
+    if path_starts_with "$AMULE_INCOMING" "$AMULE_TEMP"; then
+        printf "[PATHS] TempDir (%s) est imbriqué dans IncomingDir (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP" "$AMULE_INCOMING"
+        AMULE_TEMP="/temp"
+    fi
+}
+
+update_ini_value() {
+    file="$1"
+    section="$2"
+    key="$3"
+    value="$4"
+    tmp="${file}.tmp"
+
+    awk -v section="$section" -v key="$key" -v value="$value" '
+        BEGIN { in_section=0; done=0 }
+        /^\[/ {
+            if (in_section && !done) {
+                print key "=" value
+                done=1
+            }
+            in_section = ($0 == "[" section "]")
+        }
+        {
+            if (in_section && $0 ~ ("^" key "=")) {
+                if (!done) {
+                    print key "=" value
+                    done=1
+                }
+                next
+            }
+            print
+        }
+        END {
+            if (in_section && !done) {
+                print key "=" value
+            }
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # ── Performance tuning (Low ID optimized) ──
 MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-800}
 MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-800}
@@ -29,6 +85,8 @@ MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-60}
 DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
+
+validate_download_paths
 
 reset_cron_file() {
     cat > "$CRON_FILE" <<'CRONEOF'
@@ -77,7 +135,7 @@ mod_fix_kad_bootstrap() {
 
 mod_auto_share() {
     MOD_AUTO_SHARE_ENABLED=${MOD_AUTO_SHARE_ENABLED:-"false"}
-    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/downloads/incoming"}
+    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"${DOWNLOADS_DIR}"}
     if [ "$MOD_AUTO_SHARE_ENABLED" = "true" ]; then
         printf "[MOD] Auto-share activé: %s\n" "$MOD_AUTO_SHARE_DIRECTORIES"
         SHAREDDIR_CONF="${AMULE_HOME}/shareddir.dat"
@@ -196,7 +254,6 @@ init_settings() {
   "ipfilter_url": "http://upd.emule-security.org/ipfilter.zip",
   "scan_interval_hours": 24,
   "kad_auto_reconnect": true,
-  "auto_organize_enabled": true,
   "last_scan": null
 }
 SETTINGS_EOF
@@ -248,7 +305,9 @@ CREDEOF
         printf 'AMULE_EC_PASSWORD=%s\n' "${AMULE_GUI_PWD}"
         printf 'AMULE_EC_PASSWORD_HASH=%s\n' "${AMULE_GUI_ENCODED_PWD}"
         printf 'AMULE_HOME=%s\n' "${AMULE_HOME}"
+        printf 'DOWNLOADS_DIR=%s\n' "${DOWNLOADS_DIR}"
         printf 'INCOMING_DIR=%s\n' "${AMULE_INCOMING}"
+        printf 'TEMP_DIR=%s\n' "${AMULE_TEMP}"
         printf 'SETTINGS_FILE=%s\n' "${AMULE_HOME}/dashboard-settings.json"
     } > /etc/environment
 }
@@ -269,7 +328,7 @@ fi
 
 mkdir -p /home/amule
 
-for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups" "/downloads"; do
+for dir in "$DOWNLOADS_DIR" "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups"; do
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
@@ -541,6 +600,10 @@ if [ -n "${WEBUI_PWD:-}" ]; then
     ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
     sed -i "s|^AdminPassword=.*|AdminPassword=${AMULE_WEBUI_ENCODED_PWD}|" "$REMOTE_CONF"
 fi
+printf "  IncomingDir:     %s\n" "$AMULE_INCOMING"
+printf "  TempDir:         %s\n" "$AMULE_TEMP"
+update_ini_value "$AMULE_CONF" "eMule" "IncomingDir" "$AMULE_INCOMING"
+update_ini_value "$AMULE_CONF" "eMule" "TempDir" "$AMULE_TEMP"
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
 # ═══════════════════════════════════════════

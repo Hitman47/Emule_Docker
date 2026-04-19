@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 LABEL maintainer="custom-zimaboard"
-LABEL description="aMule for ZimaOS - Dashboard, Search, Auto-Organize"
+LABEL description="aMule for ZimaOS - Dashboard and ED2K search"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
@@ -39,7 +39,7 @@ RUN chmod +x /opt/scripts/*.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh \
-    && mkdir -p /home/amule /downloads/incoming /downloads/temp /backups /var/log/amule-diag
+    && mkdir -p /home/amule /downloads /temp /backups /var/log/amule-diag
 
 WORKDIR /home/amule
 
