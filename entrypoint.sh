@@ -23,18 +23,53 @@ IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
 CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
+normalize_path() {
+    path="$1"
+    if [ -z "$path" ]; then
+        printf "/"
+        return
+    fi
+    path=$(printf '%s' "$path" | sed 's://*:/:g')
+    [ -z "$path" ] && path="/"
+    if [ "$path" != "/" ]; then
+        while [ "${path%/}" != "$path" ]; do
+            path=${path%/}
+        done
+    fi
+    printf '%s' "$path"
+}
+
 path_starts_with() {
-    parent="$1"
-    child="$2"
-    case "${child}/" in
-        "${parent}/"*) return 0 ;;
+    parent=$(normalize_path "$1")
+    child=$(normalize_path "$2")
+    case "$child" in
+        "$parent"|"$parent"/*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 validate_download_paths() {
-    if [ "$AMULE_INCOMING" = "$AMULE_TEMP" ]; then
+    DOWNLOADS_DIR=$(normalize_path "$DOWNLOADS_DIR")
+    AMULE_INCOMING=$(normalize_path "$AMULE_INCOMING")
+    AMULE_TEMP=$(normalize_path "$AMULE_TEMP")
+
+    if [ "$AMULE_INCOMING" = "/" ]; then
+        printf "[PATHS] IncomingDir ne peut pas être / — retour à %s\n" "$DOWNLOADS_DIR"
+        AMULE_INCOMING="$DOWNLOADS_DIR"
+    fi
+
+    if [ "$AMULE_INCOMING" != "$DOWNLOADS_DIR" ] && path_starts_with "$DOWNLOADS_DIR" "$AMULE_INCOMING"; then
+        printf "[PATHS] IncomingDir (%s) est un sous-dossier de %s — aplati vers %s\n" "$AMULE_INCOMING" "$DOWNLOADS_DIR" "$DOWNLOADS_DIR"
+        AMULE_INCOMING="$DOWNLOADS_DIR"
+    fi
+
+    if [ "$AMULE_TEMP" = "$AMULE_INCOMING" ]; then
         printf "[PATHS] IncomingDir et TempDir identiques (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP"
+        AMULE_TEMP="/temp"
+    fi
+
+    if path_starts_with "$DOWNLOADS_DIR" "$AMULE_TEMP"; then
+        printf "[PATHS] TempDir (%s) est dans %s — TempDir forcé vers /temp\n" "$AMULE_TEMP" "$DOWNLOADS_DIR"
         AMULE_TEMP="/temp"
     fi
 
@@ -42,7 +77,11 @@ validate_download_paths() {
         printf "[PATHS] TempDir (%s) est imbriqué dans IncomingDir (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP" "$AMULE_INCOMING"
         AMULE_TEMP="/temp"
     fi
+
+    AMULE_INCOMING=$(normalize_path "$AMULE_INCOMING")
+    AMULE_TEMP=$(normalize_path "$AMULE_TEMP")
 }
+
 
 update_ini_value() {
     file="$1"
@@ -604,6 +643,8 @@ printf "  IncomingDir:     %s\n" "$AMULE_INCOMING"
 printf "  TempDir:         %s\n" "$AMULE_TEMP"
 update_ini_value "$AMULE_CONF" "eMule" "IncomingDir" "$AMULE_INCOMING"
 update_ini_value "$AMULE_CONF" "eMule" "TempDir" "$AMULE_TEMP"
+update_ini_value "$AMULE_CONF" "UserEvents/DownloadCompleted" "CoreEnabled" "1"
+update_ini_value "$AMULE_CONF" "UserEvents/DownloadCompleted" "CoreCommand" "/opt/scripts/on-download-complete.sh \"%FILE\" \"%NAME\" \"%HASH\" \"%SIZE\""
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
 # ═══════════════════════════════════════════
@@ -668,17 +709,7 @@ printf "  Reconnect=1 SmartIdCheck=1 ICH=1 AICH=1 StartNextFile=1\n"
 printf "  DAPPref=1 UAPPref=1 OnlineSignature=1 MaxConn5s=%s\n" "$MAX_CONN_5SEC"
 
 # ── FORCE-FIX: Enable download completion event ──
-if grep -q '^CoreEnabled=0' "$AMULE_CONF" 2>/dev/null; then
-    # Replace the DownloadCompleted section
-    awk '
-        /^\[UserEvents\/DownloadCompleted\]/{sect=1}
-        sect && /^CoreEnabled=/{$0="CoreEnabled=1"; sect_done=1}
-        sect && /^CoreCommand=/{$0="CoreCommand=/opt/scripts/on-download-complete.sh \"%FILE\" \"%NAME\" \"%HASH\" \"%SIZE\""}
-        sect && /^\[/ && !/^\[UserEvents\/DownloadCompleted\]/{sect=0}
-        {print}
-    ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
-    printf "  UserEvents/DownloadCompleted enabled\n"
-fi
+printf "  UserEvents/DownloadCompleted -> on-download-complete.sh\n"
 
 # ── FORCE-FIX: TempDir and IncomingDir MUST be on same mount (cross-device rename fix) ──
 printf "━━━ Cross-device rename fix ━━━\n"
@@ -703,19 +734,25 @@ else
 fi
 
 # Migrate existing files from old paths if they exist (once only)
-MIGRATE_MARKER="/downloads/.migrated"
+MIGRATE_MARKER="${DOWNLOADS_DIR}/.migrated-flat-destination-v2"
 if [ ! -f "$MIGRATE_MARKER" ]; then
-  for OLD_DIR in /incoming /temp; do
-    if [ -d "$OLD_DIR" ] && [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ]; then
-        case "$OLD_DIR" in
-            /incoming) TARGET="$AMULE_INCOMING" ;;
-            /temp)     TARGET="$AMULE_TEMP" ;;
-        esac
-        if [ "$OLD_DIR" != "$TARGET" ]; then
-            printf "  Migrating %s → %s\n" "$OLD_DIR" "$TARGET"
-            mkdir -p "$TARGET"
-            cp -an "$OLD_DIR"/* "$TARGET"/ 2>/dev/null || true
-        fi
+  for OLD_DIR in /incoming /temp "${DOWNLOADS_DIR}/incoming" "${DOWNLOADS_DIR}/downloads" "${DOWNLOADS_DIR}/temp"; do
+    [ -d "$OLD_DIR" ] || continue
+    [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ] || continue
+    case "$OLD_DIR" in
+        /incoming|"${DOWNLOADS_DIR}/incoming"|"${DOWNLOADS_DIR}/downloads") TARGET="$AMULE_INCOMING" ;;
+        /temp|"${DOWNLOADS_DIR}/temp") TARGET="$AMULE_TEMP" ;;
+        *) continue ;;
+    esac
+    if [ "$OLD_DIR" != "$TARGET" ]; then
+        printf "  Migrating %s → %s\n" "$OLD_DIR" "$TARGET"
+        mkdir -p "$TARGET"
+        cp -an "$OLD_DIR"/* "$TARGET"/ 2>/dev/null || true
+    fi
+    if rmdir "$OLD_DIR" 2>/dev/null; then
+        printf "  [✓] Legacy folder removed: %s\n" "$OLD_DIR"
+    else
+        printf "  [i] Legacy folder kept (non vide): %s\n" "$OLD_DIR"
     fi
   done
   touch "$MIGRATE_MARKER"
