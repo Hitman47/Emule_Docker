@@ -65,12 +65,6 @@ services:
       - GUI_PWD=${AMULE_GUI_PWD:-ChangeMe2025!}
       - WEBUI_PWD=${AMULE_WEBUI_PWD:-ChangeMe2025!}
 
-      # Dossiers aMule
-      # Les téléchargements terminés arrivent directement dans /downloads.
-      - DOWNLOADS_DIR=/downloads
-      - INCOMING_DIR=/downloads
-      - TEMP_DIR=/temp
-
       # Dashboard
       - DASHBOARD_ENABLED=true
       - DASHBOARD_PORT=8078
@@ -89,6 +83,11 @@ services:
       - BACKUP_ENABLED=true
       - BACKUP_CRON=0 3 * * 0
       - BACKUP_KEEP=4
+
+      # Destination fichiers : à plat dans /downloads, temporaires séparés
+      - DOWNLOADS_DIR=/downloads
+      - INCOMING_DIR=/downloads
+      - TEMP_DIR=/temp
 
       # Limites performance ZimaBoard 832
       - AMULE_MAX_CONNECTIONS=500

@@ -1,6 +1,6 @@
 # aMule ZimaBoard Edition
 
-Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur de recherche ED2K intégré, gestion de serveurs multi-sources et intégration VPN Gluetun/NordVPN.
+Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur de recherche ED2K intégré, gestion de serveurs multi-sources, et intégration VPN Gluetun/NordVPN.
 
 ## Fonctionnalités
 
@@ -25,8 +25,8 @@ Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur d
 - Bouton de reconnexion manuelle dans les Paramètres
 
 ### Automatisation
-- Les téléchargements terminés arrivent directement dans le dossier de destination
-- Aucun tri automatique ni création de sous-dossiers imposés par le conteneur
+- Téléchargements terminés écrits directement dans le dossier de destination
+- Temp séparé pour éviter les boucles de dossiers et les effets de bord
 - Auto-restart aMule (contourne les memory leaks)
 - Backup auto de la config avec rotation
 - Mise à jour auto de l'IP filter (emule-security.org)
@@ -90,8 +90,8 @@ ports:
 data/
 ├── amule-config/                  # Config aMule
 │   └── dashboard-settings.json    # Paramètres du dashboard (sources serveurs, etc.)
-├── downloads/                     # Téléchargements terminés (directement ici)
-├── temp/                          # Téléchargements incomplets / temporaires
+├── downloads/                     # Téléchargements terminés (à plat)
+├── temp/                          # Téléchargements en cours (.part)
 └── backups/                       # Sauvegardes config
 ```
 
@@ -104,8 +104,8 @@ data/
 | `DASHBOARD_PWD` | Mot de passe dashboard | = WEBUI_PWD |
 | `DASHBOARD_ENABLED` | Activer le dashboard | `true` |
 | `DASHBOARD_PORT` | Port du dashboard | `8078` |
-| `DOWNLOADS_DIR` | Racine des téléchargements terminés | `/downloads` |
-| `INCOMING_DIR` | Dossier final des téléchargements terminés | = `DOWNLOADS_DIR` |
+| `DOWNLOADS_DIR` | Dossier final des téléchargements | `/downloads` |
+| `INCOMING_DIR` | Dossier final utilisé par aMule | `/downloads` |
 | `TEMP_DIR` | Dossier des fichiers temporaires | `/temp` |
 | `SERVER_UPDATE_ENABLED` | MAJ auto serveurs | `true` |
 | `BACKUP_ENABLED` | Backup auto config | `true` |
@@ -153,7 +153,9 @@ docker restart amule
 Basé sur [ngosang/docker-amule](https://github.com/ngosang/docker-amule).
 Sources serveurs : [emule-security.org](https://www.emule-security.org/serverlist/), [peerates.net](https://edk.peerates.net/fr/), [FlyerNet](http://flyernet.fr.st.free.fr/ip_serveurs.php).
 
-## Note importante sur les dossiers
+## Comportement des dossiers
 
-Par défaut, les fichiers terminés arrivent directement dans `data/downloads/`.
-Le dossier temporaire est séparé dans `data/temp/`, ce qui évite les arborescences du type `downloads/incoming/...` et les boucles liées à une destination imbriquée.
+- Les téléchargements terminés vont directement dans `/downloads`.
+- Aucun tri automatique n'est appliqué.
+- Les fichiers temporaires restent dans `/temp`.
+- Au démarrage, le conteneur réécrit `IncomingDir` et `TempDir` dans `amule.conf` et aplati une ancienne arborescence legacy (`downloads`, `incoming`, `temp`) si elle existe encore.

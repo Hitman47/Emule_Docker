@@ -11,9 +11,9 @@ printf "\n"
 # ── Variables ──
 AMULE_UID=${PUID:-1000}
 AMULE_GID=${PGID:-1000}
-DOWNLOADS_DIR=${DOWNLOADS_DIR:-"/downloads"}
-AMULE_INCOMING=${INCOMING_DIR:-"${DOWNLOADS_DIR}"}
-AMULE_TEMP=${TEMP_DIR:-"/temp"}
+DOWNLOADS_ROOT_RAW=${DOWNLOADS_DIR:-"/downloads"}
+AMULE_INCOMING_RAW=${INCOMING_DIR:-"${DOWNLOADS_ROOT_RAW}"}
+AMULE_TEMP_RAW=${TEMP_DIR:-"/temp"}
 AMULE_HOME=/home/amule/.aMule
 AMULE_CONF=${AMULE_HOME}/amule.conf
 REMOTE_CONF=${AMULE_HOME}/remote.conf
@@ -23,99 +23,89 @@ IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
 CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
-normalize_path() {
-    path="$1"
-    if [ -z "$path" ]; then
-        printf "/"
-        return
-    fi
-    path=$(printf '%s' "$path" | sed 's://*:/:g')
-    [ -z "$path" ] && path="/"
-    if [ "$path" != "/" ]; then
-        while [ "${path%/}" != "$path" ]; do
-            path=${path%/}
-        done
-    fi
-    printf '%s' "$path"
+trim_trailing_slashes() {
+    value="$1"
+    while [ "$value" != "/" ] && [ "${value%/}" != "$value" ]; do
+        value=${value%/}
+    done
+    printf "%s" "$value"
 }
 
-path_starts_with() {
-    parent=$(normalize_path "$1")
-    child=$(normalize_path "$2")
-    case "$child" in
-        "$parent"|"$parent"/*) return 0 ;;
+normalize_abs_dir() {
+    raw="$1"
+    fallback="$2"
+    value=$(printf '%s' "${raw:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$value" ] && value="$fallback"
+    case "$value" in
+        /*) ;;
+        *) value="/$value" ;;
+    esac
+    value=$(trim_trailing_slashes "$value")
+    [ -z "$value" ] && value="$fallback"
+    mkdir -p "$value"
+    (cd "$value" 2>/dev/null && pwd -P) || printf "%s" "$value"
+}
+
+path_is_within() {
+    child=$(trim_trailing_slashes "$1")
+    parent=$(trim_trailing_slashes "$2")
+    [ "$child" = "$parent" ] && return 0
+    case "$child/" in
+        "$parent/"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-validate_download_paths() {
-    DOWNLOADS_DIR=$(normalize_path "$DOWNLOADS_DIR")
-    AMULE_INCOMING=$(normalize_path "$AMULE_INCOMING")
-    AMULE_TEMP=$(normalize_path "$AMULE_TEMP")
-
-    if [ "$AMULE_INCOMING" = "/" ]; then
-        printf "[PATHS] IncomingDir ne peut pas être / — retour à %s\n" "$DOWNLOADS_DIR"
-        AMULE_INCOMING="$DOWNLOADS_DIR"
-    fi
-
-    if [ "$AMULE_INCOMING" != "$DOWNLOADS_DIR" ] && path_starts_with "$DOWNLOADS_DIR" "$AMULE_INCOMING"; then
-        printf "[PATHS] IncomingDir (%s) est un sous-dossier de %s — aplati vers %s\n" "$AMULE_INCOMING" "$DOWNLOADS_DIR" "$DOWNLOADS_DIR"
-        AMULE_INCOMING="$DOWNLOADS_DIR"
-    fi
-
-    if [ "$AMULE_TEMP" = "$AMULE_INCOMING" ]; then
-        printf "[PATHS] IncomingDir et TempDir identiques (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP"
-        AMULE_TEMP="/temp"
-    fi
-
-    if path_starts_with "$DOWNLOADS_DIR" "$AMULE_TEMP"; then
-        printf "[PATHS] TempDir (%s) est dans %s — TempDir forcé vers /temp\n" "$AMULE_TEMP" "$DOWNLOADS_DIR"
-        AMULE_TEMP="/temp"
-    fi
-
-    if path_starts_with "$AMULE_INCOMING" "$AMULE_TEMP"; then
-        printf "[PATHS] TempDir (%s) est imbriqué dans IncomingDir (%s) — TempDir forcé vers /temp\n" "$AMULE_TEMP" "$AMULE_INCOMING"
-        AMULE_TEMP="/temp"
-    fi
-
-    AMULE_INCOMING=$(normalize_path "$AMULE_INCOMING")
-    AMULE_TEMP=$(normalize_path "$AMULE_TEMP")
+move_tree_contents() {
+    src="$1"
+    dst="$2"
+    [ -d "$src" ] || return 0
+    [ "$src" = "$dst" ] && return 0
+    mkdir -p "$dst"
+    for item in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+        [ -e "$item" ] || continue
+        base=$(basename "$item")
+        target="$dst/$base"
+        if [ -d "$item" ] && [ -d "$target" ]; then
+            move_tree_contents "$item" "$target"
+            rmdir "$item" 2>/dev/null || true
+        elif [ ! -e "$target" ]; then
+            mv "$item" "$target"
+        else
+            alt="$dst/${base}.migrated.$(date +%s)"
+            mv "$item" "$alt"
+            printf "[PATHS] Collision pendant migration: %s -> %s\n" "$item" "$alt"
+        fi
+    done
+    rmdir "$src" 2>/dev/null || true
 }
 
+DOWNLOADS_ROOT=$(normalize_abs_dir "$DOWNLOADS_ROOT_RAW" "/downloads")
+AMULE_INCOMING=$(normalize_abs_dir "$AMULE_INCOMING_RAW" "$DOWNLOADS_ROOT")
+AMULE_TEMP=$(normalize_abs_dir "$AMULE_TEMP_RAW" "/temp")
 
-update_ini_value() {
-    file="$1"
-    section="$2"
-    key="$3"
-    value="$4"
-    tmp="${file}.tmp"
+case "$AMULE_INCOMING" in
+    "$DOWNLOADS_ROOT"/incoming|"$DOWNLOADS_ROOT"/downloads|"$DOWNLOADS_ROOT"/complete|"$DOWNLOADS_ROOT"/completed)
+        printf "[PATHS] IncomingDir imbriqué détecté (%s) -> aplati vers %s\n" "$AMULE_INCOMING" "$DOWNLOADS_ROOT"
+        AMULE_INCOMING="$DOWNLOADS_ROOT"
+        mkdir -p "$AMULE_INCOMING"
+        ;;
+esac
 
-    awk -v section="$section" -v key="$key" -v value="$value" '
-        BEGIN { in_section=0; done=0 }
-        /^\[/ {
-            if (in_section && !done) {
-                print key "=" value
-                done=1
-            }
-            in_section = ($0 == "[" section "]")
-        }
-        {
-            if (in_section && $0 ~ ("^" key "=")) {
-                if (!done) {
-                    print key "=" value
-                    done=1
-                }
-                next
-            }
-            print
-        }
-        END {
-            if (in_section && !done) {
-                print key "=" value
-            }
-        }
-    ' "$file" > "$tmp" && mv "$tmp" "$file"
-}
+if [ "$AMULE_INCOMING" != "$DOWNLOADS_ROOT" ] && path_is_within "$AMULE_INCOMING" "$DOWNLOADS_ROOT"; then
+    printf "[PATHS] IncomingDir dans le dossier final (%s) -> aplati vers %s\n" "$AMULE_INCOMING" "$DOWNLOADS_ROOT"
+    AMULE_INCOMING="$DOWNLOADS_ROOT"
+fi
+
+if [ "$AMULE_TEMP" = "$AMULE_INCOMING" ] || path_is_within "$AMULE_TEMP" "$AMULE_INCOMING" || path_is_within "$AMULE_TEMP" "$DOWNLOADS_ROOT"; then
+    printf "[PATHS] TempDir invalide (%s) -> déplacé vers /temp\n" "$AMULE_TEMP"
+    AMULE_TEMP="/temp"
+    mkdir -p "$AMULE_TEMP"
+fi
+
+printf "[PATHS] DOWNLOADS_ROOT=%s\n" "$DOWNLOADS_ROOT"
+printf "[PATHS] IncomingDir=%s\n" "$AMULE_INCOMING"
+printf "[PATHS] TempDir=%s\n" "$AMULE_TEMP"
 
 # ── Performance tuning (Low ID optimized) ──
 MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-800}
@@ -124,8 +114,6 @@ MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-60}
 DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
-
-validate_download_paths
 
 reset_cron_file() {
     cat > "$CRON_FILE" <<'CRONEOF'
@@ -174,7 +162,7 @@ mod_fix_kad_bootstrap() {
 
 mod_auto_share() {
     MOD_AUTO_SHARE_ENABLED=${MOD_AUTO_SHARE_ENABLED:-"false"}
-    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"${DOWNLOADS_DIR}"}
+    MOD_AUTO_SHARE_DIRECTORIES=${MOD_AUTO_SHARE_DIRECTORIES:-"/downloads"}
     if [ "$MOD_AUTO_SHARE_ENABLED" = "true" ]; then
         printf "[MOD] Auto-share activé: %s\n" "$MOD_AUTO_SHARE_DIRECTORIES"
         SHAREDDIR_CONF="${AMULE_HOME}/shareddir.dat"
@@ -293,6 +281,7 @@ init_settings() {
   "ipfilter_url": "http://upd.emule-security.org/ipfilter.zip",
   "scan_interval_hours": 24,
   "kad_auto_reconnect": true,
+  "auto_organize_enabled": false,
   "last_scan": null
 }
 SETTINGS_EOF
@@ -344,9 +333,9 @@ CREDEOF
         printf 'AMULE_EC_PASSWORD=%s\n' "${AMULE_GUI_PWD}"
         printf 'AMULE_EC_PASSWORD_HASH=%s\n' "${AMULE_GUI_ENCODED_PWD}"
         printf 'AMULE_HOME=%s\n' "${AMULE_HOME}"
-        printf 'DOWNLOADS_DIR=%s\n' "${DOWNLOADS_DIR}"
         printf 'INCOMING_DIR=%s\n' "${AMULE_INCOMING}"
         printf 'TEMP_DIR=%s\n' "${AMULE_TEMP}"
+        printf 'DOWNLOADS_DIR=%s\n' "${DOWNLOADS_ROOT}"
         printf 'SETTINGS_FILE=%s\n' "${AMULE_HOME}/dashboard-settings.json"
     } > /etc/environment
 }
@@ -367,7 +356,7 @@ fi
 
 mkdir -p /home/amule
 
-for dir in "$DOWNLOADS_DIR" "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups"; do
+for dir in "$DOWNLOADS_ROOT" "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups"; do
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
@@ -537,8 +526,8 @@ CryptoKadUDPKey=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
 PreventSleepWhileDownloading=0
 [UserEvents]
 [UserEvents/DownloadCompleted]
-CoreEnabled=1
-CoreCommand=/opt/scripts/on-download-complete.sh "%FILE" "%NAME" "%HASH" "%SIZE"
+CoreEnabled=0
+CoreCommand=
 GUIEnabled=0
 GUICommand=
 [UserEvents/NewChatSession]
@@ -639,12 +628,6 @@ if [ -n "${WEBUI_PWD:-}" ]; then
     ' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
     sed -i "s|^AdminPassword=.*|AdminPassword=${AMULE_WEBUI_ENCODED_PWD}|" "$REMOTE_CONF"
 fi
-printf "  IncomingDir:     %s\n" "$AMULE_INCOMING"
-printf "  TempDir:         %s\n" "$AMULE_TEMP"
-update_ini_value "$AMULE_CONF" "eMule" "IncomingDir" "$AMULE_INCOMING"
-update_ini_value "$AMULE_CONF" "eMule" "TempDir" "$AMULE_TEMP"
-update_ini_value "$AMULE_CONF" "UserEvents/DownloadCompleted" "CoreEnabled" "1"
-update_ini_value "$AMULE_CONF" "UserEvents/DownloadCompleted" "CoreCommand" "/opt/scripts/on-download-complete.sh \"%FILE\" \"%NAME\" \"%HASH\" \"%SIZE\""
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
 # ═══════════════════════════════════════════
@@ -708,57 +691,50 @@ sed -i "s/^MaxConnectionsPerFiveSeconds=.*/MaxConnectionsPerFiveSeconds=${MAX_CO
 printf "  Reconnect=1 SmartIdCheck=1 ICH=1 AICH=1 StartNextFile=1\n"
 printf "  DAPPref=1 UAPPref=1 OnlineSignature=1 MaxConn5s=%s\n" "$MAX_CONN_5SEC"
 
-# ── FORCE-FIX: Enable download completion event ──
-printf "  UserEvents/DownloadCompleted -> on-download-complete.sh\n"
-
-# ── FORCE-FIX: TempDir and IncomingDir MUST be on same mount (cross-device rename fix) ──
-printf "━━━ Cross-device rename fix ━━━\n"
+# ── FORCE-FIX: Disable completion hook and enforce flat destination paths ──
+printf "━━━ Destination path fix ━━━\n"
 CURRENT_TEMP=$(grep '^TempDir=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
 CURRENT_INC=$(grep '^IncomingDir=' "$AMULE_CONF" 2>/dev/null | head -1 | cut -d= -f2)
 printf "  Current: TempDir=%s IncomingDir=%s\n" "$CURRENT_TEMP" "$CURRENT_INC"
 
-NEED_FIX=0
-if [ "$CURRENT_TEMP" != "$AMULE_TEMP" ]; then
-    sed -i "s|^TempDir=.*|TempDir=${AMULE_TEMP}|" "$AMULE_CONF"
-    NEED_FIX=1
-fi
-if [ "$CURRENT_INC" != "$AMULE_INCOMING" ]; then
-    sed -i "s|^IncomingDir=.*|IncomingDir=${AMULE_INCOMING}|" "$AMULE_CONF"
-    NEED_FIX=1
-fi
-if [ "$NEED_FIX" -eq 1 ]; then
-    printf "  [!] Updated: TempDir=%s IncomingDir=%s\n" "$AMULE_TEMP" "$AMULE_INCOMING"
-    printf "  [!] Both are now under same mount point to prevent file loss\n"
-else
-    printf "  [✓] Paths already correct\n"
-fi
+sed -i "s|^TempDir=.*|TempDir=${AMULE_TEMP}|" "$AMULE_CONF" 2>/dev/null || true
+sed -i "s|^IncomingDir=.*|IncomingDir=${AMULE_INCOMING}|" "$AMULE_CONF" 2>/dev/null || true
 
-# Migrate existing files from old paths if they exist (once only)
-MIGRATE_MARKER="${DOWNLOADS_DIR}/.migrated-flat-destination-v2"
+awk '
+    /^\[UserEvents\/DownloadCompleted\]/{sect=1}
+    sect && /^CoreEnabled=/{$0="CoreEnabled=0"}
+    sect && /^CoreCommand=/{$0="CoreCommand="}
+    sect && /^\[/ && !/^\[UserEvents\/DownloadCompleted\]/{sect=0}
+    {print}
+' "$AMULE_CONF" > "${AMULE_CONF}.tmp" && mv "${AMULE_CONF}.tmp" "$AMULE_CONF"
+printf "  [✓] IncomingDir=%s\n" "$AMULE_INCOMING"
+printf "  [✓] TempDir=%s\n" "$AMULE_TEMP"
+printf "  [✓] Hook DownloadCompleted désactivé\n"
+
+# Flatten legacy nested folders once, then stop touching completed files.
+MIGRATE_MARKER="${DOWNLOADS_ROOT}/.amule-flat-destination-v2"
 if [ ! -f "$MIGRATE_MARKER" ]; then
-  for OLD_DIR in /incoming /temp "${DOWNLOADS_DIR}/incoming" "${DOWNLOADS_DIR}/downloads" "${DOWNLOADS_DIR}/temp"; do
+  for OLD_DIR in \
+    /incoming \
+    /temp \
+    "${DOWNLOADS_ROOT}/incoming" \
+    "${DOWNLOADS_ROOT}/temp" \
+    "${DOWNLOADS_ROOT}/downloads"
+  do
     [ -d "$OLD_DIR" ] || continue
-    [ "$(ls -A "$OLD_DIR" 2>/dev/null)" ] || continue
     case "$OLD_DIR" in
-        /incoming|"${DOWNLOADS_DIR}/incoming"|"${DOWNLOADS_DIR}/downloads") TARGET="$AMULE_INCOMING" ;;
-        /temp|"${DOWNLOADS_DIR}/temp") TARGET="$AMULE_TEMP" ;;
-        *) continue ;;
+      /temp|"${DOWNLOADS_ROOT}/temp") TARGET="$AMULE_TEMP" ;;
+      *) TARGET="$AMULE_INCOMING" ;;
     esac
     if [ "$OLD_DIR" != "$TARGET" ]; then
-        printf "  Migrating %s → %s\n" "$OLD_DIR" "$TARGET"
-        mkdir -p "$TARGET"
-        cp -an "$OLD_DIR"/* "$TARGET"/ 2>/dev/null || true
-    fi
-    if rmdir "$OLD_DIR" 2>/dev/null; then
-        printf "  [✓] Legacy folder removed: %s\n" "$OLD_DIR"
-    else
-        printf "  [i] Legacy folder kept (non vide): %s\n" "$OLD_DIR"
+      printf "  Migration legacy: %s -> %s\n" "$OLD_DIR" "$TARGET"
+      move_tree_contents "$OLD_DIR" "$TARGET"
     fi
   done
   touch "$MIGRATE_MARKER"
-  printf "  [✓] Migration marker set\n"
+  printf "  [✓] Migration legacy terminée\n"
 else
-  printf "  [✓] Already migrated (marker found)\n"
+  printf "  [✓] Migration legacy déjà appliquée\n"
 fi
 
 printf "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -825,7 +801,7 @@ sysctl -w net.core.rmem_default=262144 2>/dev/null || true
 sysctl -w net.core.wmem_default=262144 2>/dev/null || true
 sysctl -w net.core.somaxconn=1024 2>/dev/null || true
 
-# ── Start file watcher (tracks all file events in /incoming and /temp) ──
+# ── Start file watcher (tracks all file events in destination and temp) ──
 chmod +x /opt/scripts/file-watcher.sh 2>/dev/null || true
 /opt/scripts/file-watcher.sh &
 printf "[WATCHER] File event watcher started (PID: $!)\n"
