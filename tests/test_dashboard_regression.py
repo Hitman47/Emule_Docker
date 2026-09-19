@@ -216,6 +216,13 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertEqual(info['ed2k_status'], 'low_id')
         self.assertEqual(info['kad_status'], 'firewalled')
 
+    def test_bookmarklet_opens_dashboard_hash_without_token(self):
+        code = server.get_bookmarklet_code('http://192.168.1.10:8078')
+        self.assertTrue(code.startswith('javascript:'))
+        self.assertIn("window.open('http://192.168.1.10:8078/#add='", code)
+        self.assertNotIn('token', code)
+        self.assertNotIn('/api/', code)  # no cross-origin fetch from third-party pages
+
     def test_build_health_payload_reports_ready_with_realistic_status_fixture(self):
         status_raw = self.fixture('status_connected.txt')
         with mock.patch.object(server, '_check_amuled_process', return_value={'ok': True, 'pid': '1234'}), \

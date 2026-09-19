@@ -1,0 +1,13 @@
+Windows Registry Editor Version 5.00
+
+; Registers ed2k:// for the current user and points it to ed2k-to-amule.cmd.
+; 1. Copy ed2k-to-amule.cmd to C:\Tools\ (or edit the path below).
+; 2. Edit DASHBOARD_URL inside ed2k-to-amule.cmd.
+; 3. Double-click this file. Chrome/Edge/Firefox will then offer "Open aMule?" on ed2k links.
+
+[HKEY_CURRENT_USER\Software\Classes\ed2k]
+@="URL:eDonkey2000 link"
+"URL Protocol"=""
+
+[HKEY_CURRENT_USER\Software\Classes\ed2k\shell\open\command]
+@="\"C:\Tools\ed2k-to-amule.cmd\" \"%1\""

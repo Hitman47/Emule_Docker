@@ -164,6 +164,10 @@ tr:hover{background:var(--bg3)}
 .row-link{cursor:pointer;color:var(--text);text-decoration:none;border-bottom:1px dashed transparent}.row-link:hover{color:var(--accent2);border-color:rgba(129,140,248,.35)}
 .raw-block{font-size:.74em;color:var(--text3);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 
+/* ── Drag & drop of ed2k links ── */
+body.ed2k-drop::after{content:'Déposer les liens ed2k ici';position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(99,102,241,.18);border:3px dashed var(--accent);color:var(--accent2);font-size:1.4em;font-weight:700;z-index:9998;pointer-events:none}
+
 /* ── Mobile ── */
 @media(max-width:640px){
   .app{padding:8px}
@@ -693,14 +697,17 @@ tr:hover{background:var(--bg3)}
     <div class="card" style="margin-bottom:12px">
       <div class="label" style="margin-bottom:10px">🔖 Bookmarklet navigateur</div>
       <p style="color:var(--text2);font-size:.85em;margin-bottom:10px">
-        Glisse ce bouton dans ta barre de favoris. Sur une page avec des liens ed2k, clique dessus pour les envoyer au dashboard.
+        Glisse ce bouton dans ta barre de favoris. Sur une page avec des liens ed2k, clique dessus : le dashboard s'ouvre dans un nouvel onglet et ajoute les liens (fonctionne aussi depuis les sites HTTPS).
       </p>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <a id="bookmarkletLink" href="#" class="btn btn-primary btn-sm" style="cursor:grab"
            ondragstart="return true">📥 aMule Ajouter</a>
         <button class="btn btn-ghost btn-sm" onclick="loadBookmarklet()">Rafraichir le lien</button>
       </div>
-      <p style="font-size:.75em;color:var(--text3);margin-top:8px">Fonctionne sur n'importe quel site avec des liens ed2k://</p>
+      <p style="font-size:.75em;color:var(--text3);margin-top:8px">
+        Autres façons d'ajouter : <strong>coller</strong> (Ctrl+V) des liens n'importe où sur le dashboard, <strong>glisser-déposer</strong> un lien depuis un autre onglet,
+        ou ouvrir <code>http://&lt;ip&gt;:8078/#add=ed2k://...</code> (utilisé par le gestionnaire de protocole Windows, voir README).
+      </p>
     </div>
   </div>
 </div>
@@ -1649,12 +1656,20 @@ async function loadBookmarklet() {
 }
 
 // ── ED2K Links ──
-async function addEd2k() {
+const ED2K_LINK_RE = /ed2k:\/\/\|[^\s]*?\|\//gi;
+
+function extractEd2kLinks(text) {
+  const found = String(text || '').match(ED2K_LINK_RE) || [];
+  return [...new Set(found.map(l => l.trim()))];
+}
+
+async function addEd2k(text = null) {
   if (!ensureWritable("L'ajout ED2K")) return;
   const input = document.getElementById('ed2kLink');
+  if (text != null) input.value = String(text);
   const link = input.value.trim();
   const msg = document.getElementById('ed2kMsg');
-  const btn = document.querySelector('.ed2k-box .btn');
+  const btn = document.querySelector('#panel-downloads .btn-primary');
   if (!link.includes('ed2k://')) {
     msg.className = 'msg err show'; msg.textContent = 'Aucun lien ED2K trouvé dans le texte collé';
     return;
@@ -1674,6 +1689,61 @@ async function addEd2k() {
     msg.className = 'msg err show'; msg.textContent = getActionMessage(d, 'Erreur réseau');
   }
   setTimeout(() => msg.classList.remove('show'), 3500);
+}
+
+// ── ED2K intake: #add= (bookmarklet / OS handler), paste, drag & drop ──
+function consumeEd2kFromHash() {
+  const hash = location.hash || '';
+  if (!hash.startsWith('#add=')) return false;
+  let raw = '';
+  try { raw = decodeURIComponent(hash.slice(5)); } catch { raw = hash.slice(5); }
+  history.replaceState(null, '', location.pathname + location.search);
+  const links = extractEd2kLinks(raw);
+  if (!links.length) { showToast('err', "Aucun lien ed2k valide dans l'URL"); return false; }
+  switchTab('downloads');
+  showToast('info', links.length + ' lien(s) ed2k reçu(s), ajout en cours...');
+  addEd2k(links.join('\n'));
+  return true;
+}
+
+function submitEd2kFromText(raw, origin) {
+  const links = extractEd2kLinks(raw);
+  if (!links.length) return false;
+  switchTab('downloads');
+  showToast('info', `${links.length} lien(s) ed2k ${origin}, ajout en cours...`);
+  addEd2k(links.join('\n'));
+  return true;
+}
+
+function bindEd2kIntake() {
+  window.addEventListener('hashchange', consumeEd2kFromHash);
+
+  // Paste anywhere outside an input: if the clipboard holds ed2k links, add them
+  document.addEventListener('paste', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const raw = e.clipboardData?.getData('text') || '';
+    if (submitEd2kFromText(raw, 'collé(s)')) e.preventDefault();
+  });
+
+  // Drag a link from another tab/window onto the page
+  document.addEventListener('dragover', (e) => {
+    const types = [...(e.dataTransfer?.types || [])];
+    if (types.includes('text/uri-list') || types.includes('text/plain')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      document.body.classList.add('ed2k-drop');
+    }
+  });
+  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('ed2k-drop'); });
+  document.addEventListener('drop', (e) => {
+    document.body.classList.remove('ed2k-drop');
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    const dt = e.dataTransfer;
+    const raw = (dt?.getData('text/uri-list') || '') + '\n' + (dt?.getData('text/plain') || '');
+    if (submitEd2kFromText(raw, 'déposé(s)')) e.preventDefault();
+  });
 }
 
 // ── Servers ──
@@ -2351,8 +2421,11 @@ async function init() {
   await loadFiles();
   loadStatsChart();
   loadBookmarklet();
-  if (saved.activeTab && saved.activeTab !== 'dashboard') switchTab(saved.activeTab, {load: true, persist: false});
-  else switchTab('dashboard', {load: false, persist: false});
+  bindEd2kIntake();
+  if (!consumeEd2kFromHash()) {
+    if (saved.activeTab && saved.activeTab !== 'dashboard') switchTab(saved.activeTab, {load: true, persist: false});
+    else switchTab('dashboard', {load: false, persist: false});
+  }
 
   // Auto-refresh: status + downloads always, interval configurable
   restartAutoRefresh();

@@ -98,6 +98,15 @@ data/
 └── logs/                          # Logs de diagnostic (/var/log/amule-diag)
 ```
 
+## Ajouter des liens ed2k depuis le navigateur
+
+Chrome et Firefox refusent qu'une page web s'enregistre comme gestionnaire du protocole `ed2k://` (liste blanche de schémas). Quatre façons d'envoyer des liens au dashboard :
+
+1. **Bookmarklet** (Paramètres → Bookmarklet) : glisse le bouton dans ta barre de favoris. Sur une page contenant des liens ed2k, clique dessus : le dashboard s'ouvre dans un nouvel onglet et ajoute les liens. Fonctionne depuis les sites HTTPS (le bookmarklet ne fait pas de requête depuis la page, il ouvre `http://<ip>:8078/#add=…`).
+2. **Coller** : Ctrl+V n'importe où sur le dashboard (hors champ de saisie) avec des liens ed2k dans le presse-papiers.
+3. **Glisser-déposer** : fais glisser un lien ed2k depuis un autre onglet vers le dashboard.
+4. **Clic direct sur les liens ed2k (Windows)** : `tools/windows/` contient un gestionnaire de protocole. Copie `ed2k-to-amule.cmd` dans `C:\Tools\`, édite `DASHBOARD_URL`, puis double-clique `register-ed2k-handler.reg`. Le navigateur proposera ensuite « Ouvrir aMule ? » sur chaque lien ed2k (coche « Toujours autoriser »). Aucun mot de passe n'est stocké : c'est ta session navigateur qui est utilisée.
+
 ## Low ID / High ID
 
 Derrière un VPN **sans port forwarding** (NordVPN par exemple), aMule obtient un **Low ID** et Kad est « firewalled ». C'est normal et ça fonctionne, mais tu n'es joignable que par les clients High ID. Pour un High ID il faut un VPN avec port forwarding (ProtonVPN, AirVPN, PIA) : voir les exemples commentés dans `docker-compose.yml`.

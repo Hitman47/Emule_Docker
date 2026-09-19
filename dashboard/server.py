@@ -1591,20 +1591,27 @@ def record_stats_snapshot(dl_speed, ul_speed):
 # ══════════════════════════════════════════
 # Bookmarklet
 # ══════════════════════════════════════════
-def get_bookmarklet_code(dashboard_url, token):
-    """Generate a bookmarklet JS that sends ed2k links to the dashboard."""
-    return (
-        f"javascript:void((function(){{"
-        f"var links=document.querySelectorAll('a[href^=\"ed2k://\"]');"
-        f"if(!links.length){{var sel=window.getSelection().toString().trim();"
-        f"if(sel.startsWith('ed2k://')){{links=[{{href:sel}}]}}}};"
-        f"if(!links.length){{alert('Aucun lien ed2k trouvé sur cette page');return}};"
-        f"var added=0;for(var i=0;i<links.length;i++){{"
-        f"var h=links[i].href||links[i];fetch('{dashboard_url}/api/add_ed2k?link='"
-        f"+encodeURIComponent(h)+'&token={token}').then(function(){{added++}})}};"
-        f"setTimeout(function(){{alert(links.length+' lien(s) ed2k envoyé(s) au dashboard')}},1500)"
-        f"}})())"
-    )
+def get_bookmarklet_code(dashboard_url):
+    """Generate a bookmarklet that hands ed2k links to the dashboard.
+
+    It opens ``<dashboard>/#add=<links>`` in a new tab instead of calling the API
+    from the third-party page: a cross-origin ``fetch`` from an HTTPS site to the
+    HTTP dashboard is blocked by Chrome (mixed content + Private Network Access),
+    while a top-level navigation is always allowed. No token is embedded — the
+    dashboard tab uses the normal session cookie.
+    """
+    js = (
+        "(function(){"
+        "var seen={},links=[];"
+        r"function add(h){h=String(h||'').trim();if(/^ed2k:\/\//i.test(h)&&!seen[h]){seen[h]=1;links.push(h)}}"
+        "document.querySelectorAll('a[href]').forEach(function(a){add(a.getAttribute('href'))});"
+        "var sel=String(window.getSelection&&window.getSelection()||'');"
+        r"(sel.match(/ed2k:\/\/\|[^\s]*?\|\//gi)||[]).forEach(add);"
+        "if(!links.length){alert('Aucun lien ed2k:// trouvé sur cette page');return}"
+        r"window.open('%s/#add='+encodeURIComponent(links.join('\n')),'_blank');"
+        "})()"
+    ) % dashboard_url
+    return "javascript:" + js
 
 
 def normalize_action_error(action, code, detail=""):
@@ -2302,7 +2309,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if pwd == DASHBOARD_PWD:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Set-Cookie', f'token={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Strict')
+                self.send_header('Set-Cookie', f'token={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax')
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True, "token": AUTH_TOKEN}).encode())
@@ -2314,7 +2321,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True}).encode())
             return
@@ -2326,7 +2333,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if not self.check_auth():
-            if path.startswith("/api/"): self.send_json({"error": "unauthorized"}, 401)
+            if path.startswith("/api/"):
+                self.send_json({"error": "unauthorized"}, 401)
+            elif path in ("/", "/index.html"):
+                # Serve the login form in place (no redirect) so a "#add=..." fragment survives the login.
+                self.serve_login()
             else:
                 self.send_response(302); self.send_header('Location', '/login'); self.end_headers()
             return
@@ -2682,12 +2693,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"daily": stats.get("daily", {})})
 
         elif path == "/api/bookmarklet":
-            # Generate bookmarklet code
             host = self.headers.get("Host", "localhost:8078")
-            scheme = "http"
+            scheme = "https" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else "http"
             url = f"{scheme}://{host}"
-            code = get_bookmarklet_code(url, AUTH_TOKEN)
-            self.send_json({"bookmarklet": code, "url": url})
+            self.send_json({"bookmarklet": get_bookmarklet_code(url), "url": url})
 
         elif path == "/" or path == "/index.html":
             self.serve_file(STATIC_DIR / "index.html", "text/html")
@@ -2737,7 +2746,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/logout":
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True}).encode())
             return
@@ -2903,7 +2912,7 @@ button:hover{background:#4f46e5}
 <button onclick="go()">Connexion</button></div>
 <script>async function go(){const p=document.getElementById('p').value;
 const r=await fetch('/api/login?password='+encodeURIComponent(p));const d=await r.json();
-if(d.ok)window.location='/';else document.getElementById('e').style.display='block'}</script>
+if(d.ok){if(location.pathname==='/')location.reload();else window.location='/'+(location.hash||'')}else document.getElementById('e').style.display='block'}</script>
 </body></html>"""
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
