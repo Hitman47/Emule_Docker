@@ -129,6 +129,14 @@ Derrière un VPN **sans port forwarding** (NordVPN par exemple), aMule obtient u
 | `AMULE_MAX_SOURCES_PER_FILE` | Sources max/fichier | `800` |
 | `AMULE_MAX_CONN_PER_5SEC` | Nouvelles connexions / 5 s | `60` |
 | `SOURCE_BOOST_AUTO_PAUSE_ENABLED` | Auto-pause des DL sans source | `false` |
+| `TRUSTED_PROXY_CIDRS` | Réseaux dont on accepte `X-Forwarded-For` (reverse proxy) | vide |
+| `DASHBOARD_VERBOSE_PARSE` | Logs détaillés des appels amulecmd | `0` |
+
+### API du dashboard
+
+- Authentification : `POST /api/login` `{"password": "..."}` → cookie de session (aléatoire, 30 jours). Pour un script ou l'extension navigateur : `POST /api/sessions/create` `{"label": "..."}` renvoie un token sans expiration à passer en `Authorization: Bearer <token>`. `GET /api/sessions` liste, `POST /api/sessions/revoke` `{"id": "..."}` révoque.
+- Actions d'écriture (`/api/pause`, `/api/resume`, `/api/cancel`, `/api/add_ed2k`, `/api/connect`, `/api/kad/reconnect`, `/api/scan_now`, `/api/source_boost`) : **POST** avec corps JSON (`{"hash": "..."}`, `{"link": "..."}`, `{"target": "ed2k"}`). La forme GET reste acceptée une version avec l'en-tête `Deprecation: true`.
+- Lecture : `status` et `show dl` sont exécutés par un thread de fond toutes les `refresh_interval_sec` secondes ; les requêtes HTTP lisent la mémoire (aucun `amulecmd` par requête).
 | `AMULE_DOWNLOAD_CAPACITY` | Capacité DL (Ko/s) | `300` |
 | `AMULE_UPLOAD_CAPACITY` | Capacité UL (Ko/s) | `80` |
 

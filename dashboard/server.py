@@ -13,8 +13,12 @@ import shutil
 import time
 import re
 import hashlib
+import hmac
+import ipaddress
+import secrets
 import threading
 import html
+import atexit
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -28,6 +32,8 @@ DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "4713"))
 DASHBOARD_PWD = os.environ.get("DASHBOARD_PWD", "admin")
 INCOMING_DIR = os.environ.get("INCOMING_DIR", "/downloads")
 TEMP_DIR = os.environ.get("TEMP_DIR", "/downloads/.amule-temp")
+
+VERBOSE_PARSE_LOG = os.environ.get("DASHBOARD_VERBOSE_PARSE", "0") in ("1", "true", "yes")
 
 # Try to load credentials from file (more reliable than env vars)
 AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
@@ -157,13 +163,32 @@ def get_dashboard_config():
     return normalize_settings(load_settings()).get("dashboard", dict(DEFAULT_DASHBOARD_CONFIG))
 
 
+_settings_cache = {"path": None, "mtime": None, "value": None}
+_settings_lock = threading.Lock()
+
+
 def load_settings():
-    """Load persistent settings from JSON file."""
+    """Load persistent settings from JSON file (cached on file mtime)."""
+    try:
+        mtime = os.stat(SETTINGS_FILE).st_mtime_ns
+    except OSError:
+        mtime = None
+    with _settings_lock:
+        if _settings_cache["path"] == SETTINGS_FILE and _settings_cache["mtime"] == mtime and _settings_cache["value"] is not None:
+            return json.loads(_settings_cache["value"])
     try:
         with open(SETTINGS_FILE, "r") as f:
-            return normalize_settings(json.load(f))
+            value = normalize_settings(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return normalize_settings(None)
+        value = normalize_settings(None)
+    with _settings_lock:
+        _settings_cache.update({"path": SETTINGS_FILE, "mtime": mtime, "value": json.dumps(value)})
+    return value
+
+
+def invalidate_settings_cache():
+    with _settings_lock:
+        _settings_cache.update({"path": None, "mtime": None, "value": None})
 
 
 def save_settings(settings):
@@ -172,6 +197,7 @@ def save_settings(settings):
         normalized = normalize_settings(settings)
         with open(SETTINGS_FILE, "w") as f:
             json.dump(normalized, f, indent=2, ensure_ascii=False)
+        invalidate_settings_cache()
         sync_action_history_limit(normalized.get("dashboard", {}))
         return True
     except Exception:
@@ -193,8 +219,139 @@ def get_server_sources_from_settings():
 # Active server sources (refreshed from settings)
 SERVER_SOURCES = get_server_sources_from_settings()
 
-# ── Simple session auth ──
-AUTH_TOKEN = hashlib.sha256(DASHBOARD_PWD.encode()).hexdigest()[:32]
+# ── Session auth ──
+# Tokens are random per login (secrets.token_urlsafe) and persisted so they survive a
+# container restart. "api" tokens (for the browser extension) never expire until revoked.
+SESSIONS_FILE = os.path.join(AMULE_HOME, "dashboard-sessions.json")
+SESSION_TTL_SECONDS = 30 * 24 * 3600
+_sessions = {}
+_sessions_lock = threading.Lock()
+
+
+def _load_sessions():
+    global _sessions
+    try:
+        with open(SESSIONS_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _sessions = {str(k): v for k, v in data.items() if isinstance(v, dict)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        _sessions = {}
+
+
+def _save_sessions():
+    try:
+        tmp = SESSIONS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_sessions, f)
+        os.replace(tmp, SESSIONS_FILE)
+        try:
+            os.chmod(SESSIONS_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        print(f"[DASHBOARD] cannot persist sessions: {exc}", flush=True)
+
+
+def create_session(kind="browser", label="", client_ip=""):
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with _sessions_lock:
+        _sessions[token] = {"kind": kind, "label": label[:60], "created": now, "last_seen": now, "ip": client_ip}
+        _save_sessions()
+    return token
+
+
+def _session_valid(entry, now=None):
+    now = now or int(time.time())
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("kind") == "api":
+        return True
+    return now - int(entry.get("created", 0)) < SESSION_TTL_SECONDS
+
+
+def validate_session(token):
+    if not token:
+        return False
+    now = int(time.time())
+    with _sessions_lock:
+        entry = _sessions.get(token)
+        if not _session_valid(entry, now):
+            if entry is not None:
+                _sessions.pop(token, None)
+                _save_sessions()
+            return False
+        # Touch at most once a minute to avoid a disk write per request
+        if now - int(entry.get("last_seen", 0)) > 60:
+            entry["last_seen"] = now
+            _save_sessions()
+    return True
+
+
+def revoke_session(token):
+    with _sessions_lock:
+        removed = _sessions.pop(token, None) is not None
+        if removed:
+            _save_sessions()
+    return removed
+
+
+def revoke_session_by_id(session_id):
+    with _sessions_lock:
+        for token in list(_sessions):
+            if _session_id(token) == session_id:
+                _sessions.pop(token, None)
+                _save_sessions()
+                return True
+    return False
+
+
+def _session_id(token):
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+def list_sessions():
+    now = int(time.time())
+    items = []
+    with _sessions_lock:
+        for token, entry in _sessions.items():
+            if not _session_valid(entry, now):
+                continue
+            items.append({
+                "id": _session_id(token),
+                "kind": entry.get("kind", "browser"),
+                "label": entry.get("label", ""),
+                "created": entry.get("created", 0),
+                "last_seen": entry.get("last_seen", 0),
+                "ip": entry.get("ip", ""),
+            })
+    items.sort(key=lambda x: -int(x.get("last_seen") or 0))
+    return items
+
+
+def password_matches(candidate):
+    return hmac.compare_digest(str(candidate or "").encode("utf-8"), DASHBOARD_PWD.encode("utf-8"))
+
+
+_load_sessions()
+
+
+# ── Trusted proxies (X-Forwarded-For is only honoured from these networks) ──
+def _parse_trusted_proxies(raw):
+    nets = []
+    for item in str(raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            print(f"[DASHBOARD] ignoring invalid TRUSTED_PROXY_CIDRS entry: {item}", flush=True)
+    return nets
+
+
+TRUSTED_PROXIES = _parse_trusted_proxies(os.environ.get("TRUSTED_PROXY_CIDRS", ""))
 
 # ── Cache ──
 _cache = {}
@@ -217,9 +374,10 @@ def cache_clear(*keys):
     with _cache_lock:
         if not keys:
             _cache.clear()
-            return
         for key in keys:
             _cache.pop(key, None)
+    if not keys or "status" in keys or "downloads" in keys:
+        request_refresh()
 
 
 def stable_json_dumps(data):
@@ -255,19 +413,34 @@ _rate_limit_buckets = {}
 
 
 def get_client_ip(handler):
-    forwarded = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
     try:
-        return handler.client_address[0]
+        peer = handler.client_address[0]
     except Exception:
         return "unknown"
+    if TRUSTED_PROXIES:
+        try:
+            peer_ip = ipaddress.ip_address(peer)
+        except ValueError:
+            return peer
+        if any(peer_ip in net for net in TRUSTED_PROXIES):
+            forwarded = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            if forwarded:
+                return forwarded
+    return peer
+
+
+_rate_limit_calls = 0
 
 
 def rate_limit_retry_after(bucket, key, limit, window=60):
+    global _rate_limit_calls
     now = time.time()
     scope = f"{bucket}:{key}"
     with _rate_limit_lock:
+        _rate_limit_calls += 1
+        if _rate_limit_calls % 200 == 0:
+            for stale in [k for k, d in _rate_limit_buckets.items() if not d or now - d[-1] >= window]:
+                _rate_limit_buckets.pop(stale, None)
         dq = _rate_limit_buckets.get(scope)
         if dq is None:
             dq = collections.deque()
@@ -640,10 +813,12 @@ def _exec_amulecmd(command, password, timeout=30):
     """Low-level amulecmd execution with a specific password."""
     try:
         cmd = ["amulecmd", "-h", EC_HOST, "-p", EC_PORT, "-P", password, "-c", command]
-        _log(f"EXEC: amulecmd -h {EC_HOST} -p {EC_PORT} -P {'***'+password[-4:] if len(password)>4 else '***'} -c {command}")
+        if VERBOSE_PARSE_LOG:
+            _log(f"EXEC: amulecmd -c {command}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         output = result.stdout + result.stderr
-        _log(f"  RC={result.returncode} | output={output[:200].replace(chr(10),' | ')}")
+        if VERBOSE_PARSE_LOG or result.returncode != 0:
+            _log(f"  RC={result.returncode} | output={output[:200].replace(chr(10),' | ')}")
         return output
     except subprocess.TimeoutExpired:
         _log(f"  TIMEOUT after {timeout}s")
@@ -734,6 +909,127 @@ def run_amulecmd(command, timeout=30):
         return _clean_amulecmd_output(output)
 
     return "ERROR: no password configured"
+
+
+# ── Single-flight: concurrent identical read commands share one amulecmd run ──
+_singleflight_lock = threading.Lock()
+_singleflight = {}
+
+
+def run_amulecmd_shared(command, timeout=30):
+    with _singleflight_lock:
+        entry = _singleflight.get(command)
+        leader = entry is None
+        if leader:
+            entry = {"event": threading.Event(), "result": None}
+            _singleflight[command] = entry
+    if leader:
+        try:
+            entry["result"] = run_amulecmd(command, timeout)
+        finally:
+            with _singleflight_lock:
+                _singleflight.pop(command, None)
+            entry["event"].set()
+        return entry["result"]
+    entry["event"].wait(timeout + 5)
+    return entry["result"] if entry["result"] is not None else "ERROR: timeout"
+
+
+# ── Background poller: one `status` + one `show dl` per interval, shared by every client ──
+class CorePoller(threading.Thread):
+    """Refreshes status/downloads payloads in the background so HTTP handlers never fork amulecmd."""
+
+    def __init__(self):
+        super().__init__(name="core-poller", daemon=True)
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._state = {"status": None, "downloads": None, "downloads_raw": None, "updated": 0.0}
+        self._last_raw_dump = 0.0
+
+    def interval(self):
+        try:
+            return max(2, int(get_dashboard_config().get("refresh_interval_sec", 5)))
+        except Exception:
+            return 5
+
+    def refresh_now(self):
+        self._wake.set()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._state)
+
+    def is_fresh(self, max_age=None):
+        snap = self.snapshot()
+        if not snap.get("updated"):
+            return False
+        return time.time() - snap["updated"] <= (max_age or 3 * self.interval())
+
+    def _tick(self):
+        status = build_status_payload()
+        dl_raw = run_amulecmd("show dl")
+        downloads = build_downloads_payload(dl_raw, include_raw=True)
+        now = time.time()
+        with self._lock:
+            prev = self._state.get("updated") or 0.0
+            self._state = {"status": status, "downloads": downloads, "downloads_raw": dl_raw, "updated": now}
+        dt = (now - prev) if prev else 0.0
+        if 0 < dt < 3600:
+            try:
+                record_stats_snapshot(status.get("download_speed", 0), status.get("upload_speed", 0), dt)
+            except Exception as exc:
+                _log(f"stats snapshot failed: {exc}")
+        if get_dashboard_config().get("debug_mode", True) and now - self._last_raw_dump > 60:
+            self._last_raw_dump = now
+            try:
+                with open("/var/log/amule-diag/last-raw-showdl.txt", "w") as f:
+                    f.write(dl_raw or "")
+            except Exception:
+                pass
+
+    def run(self):
+        _log("core poller started")
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as exc:
+                _log(f"core poller error: {exc}")
+            self._wake.wait(self.interval())
+            self._wake.clear()
+
+
+_poller = None
+
+
+def get_poller():
+    return _poller
+
+
+def start_poller():
+    global _poller
+    if _poller is None:
+        _poller = CorePoller()
+        _poller.start()
+    return _poller
+
+
+def poller_state(key, max_age=None):
+    """Return the poller's cached payload for key, or None when absent/stale."""
+    poller = get_poller()
+    if poller is None or not poller.is_fresh(max_age):
+        return None
+    return poller.snapshot().get(key)
+
+
+def request_refresh():
+    poller = get_poller()
+    if poller is not None:
+        poller.refresh_now()
 
 
 # ── Read ECPassword hash from amule.conf at startup ──
@@ -1009,10 +1305,11 @@ def parse_downloads(raw):
         item["issues"] = detect_download_issues(item)
         item["problematic"] = bool(item["issues"])
 
-    _log(f"parse_downloads: {len(downloads)} downloads parsed")
-    _log(f"  RAW first 500 chars: {str(raw or '')[:500].replace(chr(10), ' | ')}")
-    for i, dl in enumerate(downloads[:5]):
-        _log(f"  [{i}] {dl['name'][:50]}... | size={dl['size']!r} | {float(dl.get('progress') or 0):.1f}% | spd={dl['speed']} | {dl['status']} | src={dl['sources']}")
+    if VERBOSE_PARSE_LOG:
+        _log(f"parse_downloads: {len(downloads)} downloads parsed")
+        _log(f"  RAW first 500 chars: {str(raw or '')[:500].replace(chr(10), ' | ')}")
+        for i, dl in enumerate(downloads[:5]):
+            _log(f"  [{i}] {dl['name'][:50]}... | size={dl['size']!r} | {float(dl.get('progress') or 0):.1f}% | spd={dl['speed']} | {dl['status']} | src={dl['sources']}")
 
     return downloads
 
@@ -1234,12 +1531,6 @@ def build_status_payload(raw=None):
 
 def build_downloads_payload(raw=None, include_raw=True):
     raw = raw if raw is not None else run_amulecmd("show dl")
-    # Save raw output for debugging
-    try:
-        with open("/var/log/amule-diag/last-raw-showdl.txt", "w") as _f:
-            _f.write(raw or "")
-    except Exception:
-        pass
     data = parse_downloads(raw)
     for item in data:
         item["eta"] = estimate_eta_text(item)
@@ -1322,8 +1613,8 @@ def parse_uploads(raw):
 
 def build_clients_payload():
     """Build payload with upload queue, statistics, and source info."""
-    ul_raw = run_amulecmd("show ul", timeout=10)
-    stats_raw = run_amulecmd("statistics", timeout=10)
+    ul_raw = run_amulecmd_shared("show ul", timeout=10)
+    stats_raw = run_amulecmd_shared("statistics", timeout=10)
     uploads = parse_uploads(ul_raw)
 
     # Extract useful stats from statistics output
@@ -1546,22 +1837,65 @@ init_action_history_store()
 
 STATS_FILE = os.path.join(AMULE_HOME, "dashboard-stats.json")
 
+_stats_lock = threading.Lock()
+_stats_mem = {"data": None, "path": None, "dirty": False, "last_flush": 0.0}
+STATS_FLUSH_INTERVAL = 60
+
+
 def _load_stats():
+    with _stats_lock:
+        if _stats_mem["data"] is not None and _stats_mem["path"] == STATS_FILE:
+            return _stats_mem["data"]
     try:
         with open(STATS_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"daily": {}, "snapshots": []}
+        data = {"daily": {}, "snapshots": []}
+    if not isinstance(data, dict):
+        data = {"daily": {}, "snapshots": []}
+    data.setdefault("daily", {})
+    with _stats_lock:
+        _stats_mem.update({"data": data, "path": STATS_FILE, "dirty": False})
+    return data
 
-def _save_stats(data):
+
+def _save_stats(data, force=False):
+    """Persist stats at most every STATS_FLUSH_INTERVAL seconds (force=True on shutdown)."""
+    now = time.time()
+    with _stats_lock:
+        _stats_mem.update({"data": data, "path": STATS_FILE, "dirty": True})
+        if not force and now - _stats_mem["last_flush"] < STATS_FLUSH_INTERVAL:
+            return
+        _stats_mem["last_flush"] = now
+        _stats_mem["dirty"] = False
+        blob = json.dumps(data, ensure_ascii=False)
     try:
-        with open(STATS_FILE, "w") as f:
-            json.dump(data, f, ensure_ascii=False)
+        tmp = STATS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(blob)
+        os.replace(tmp, STATS_FILE)
     except Exception:
         pass
 
-def record_stats_snapshot(dl_speed, ul_speed):
-    """Called every status poll to accumulate daily stats."""
+
+def flush_stats():
+    with _stats_lock:
+        data = _stats_mem["data"] if _stats_mem["dirty"] else None
+    if data is not None:
+        _save_stats(data, force=True)
+
+
+atexit.register(flush_stats)
+
+
+def record_stats_snapshot(dl_speed, ul_speed, dt_seconds=5.0):
+    """Accumulate daily transfer stats. dt_seconds = real time since the previous sample."""
+    try:
+        dt = float(dt_seconds)
+    except Exception:
+        dt = 5.0
+    if dt <= 0:
+        return
     stats = _load_stats()
     today = time.strftime("%Y-%m-%d")
 
@@ -1570,9 +1904,9 @@ def record_stats_snapshot(dl_speed, ul_speed):
                                   "peak_dl": 0, "peak_ul": 0}
 
     day = stats["daily"][today]
-    # Accumulate bytes (speed is KB/s, poll interval ~5s)
-    day["dl_bytes"] += int(dl_speed * 1024 * 5)
-    day["ul_bytes"] += int(ul_speed * 1024 * 5)
+    # speed is KB/s
+    day["dl_bytes"] += int(dl_speed * 1024 * dt)
+    day["ul_bytes"] += int(ul_speed * 1024 * dt)
     day["samples"] += 1
     if dl_speed > day["peak_dl"]:
         day["peak_dl"] = round(dl_speed, 1)
@@ -2272,7 +2606,13 @@ def filter_log_lines(lines, level="all", contains="", limit=120):
     }
 
 
+WRITE_ACTION_PATHS = frozenset(['/api/add_ed2k', '/api/pause', '/api/resume', '/api/cancel', '/api/connect', '/api/kad/reconnect', '/api/scan_now', '/api/source_boost'])
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "aMuleDashboard/2"
+    _extra_headers = ()
+
     def log_message(self, *a): pass
 
     def send_json(self, data, status=200):
@@ -2282,14 +2622,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', len(body))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
+        for name, value in (self._extra_headers or ()):
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def check_auth(self):
+    def _session_token(self):
+        auth = self.headers.get('Authorization', '')
+        if auth.lower().startswith('bearer '):
+            return auth[7:].strip()
         cookie = self.headers.get('Cookie', '')
-        if f'token={AUTH_TOKEN}' in cookie: return True
-        qs = parse_qs(urlparse(self.path).query)
-        return qs.get('token', [None])[0] == AUTH_TOKEN
+        for part in cookie.split(';'):
+            name, _, value = part.strip().partition('=')
+            if name == 'token' and value:
+                return value.strip()
+        return ''
+
+    def check_auth(self):
+        return validate_session(self._session_token())
+
+    def read_json_body(self):
+        try:
+            length = int(self.headers.get('Content-Length', 0) or 0)
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length).decode('utf-8', errors='replace') if length else ""
+        if not body:
+            return {}
+        return json.loads(body)
+
+    def _handle_login(self, password):
+        cfg = get_dashboard_config()
+        retry_after = rate_limit_retry_after("login", get_client_ip(self), cfg.get("login_rate_limit_per_minute", 20), 60)
+        if retry_after:
+            self.send_json({"ok": False, "error": f"Trop de tentatives. Réessaie dans {retry_after}s.", "retry_after": retry_after}, 429)
+            return
+        if not password_matches(password):
+            self.send_json({"ok": False, "error": "Mot de passe incorrect"}, 401)
+            return
+        token = create_session("browser", self.headers.get("User-Agent", "")[:60], get_client_ip(self))
+        body = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(body))
+        self.send_header('Set-Cookie', f'token={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_logout(self):
+        revoke_session(self._session_token())
+        body = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(body))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -2300,34 +2690,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.serve_login(); return
 
         if path == "/api/login":
-            cfg = get_dashboard_config()
-            retry_after = rate_limit_retry_after("login", get_client_ip(self), cfg.get("login_rate_limit_per_minute", 20), 60)
-            if retry_after:
-                self.send_json({"ok": False, "error": f"Trop de tentatives. Réessaie dans {retry_after}s.", "retry_after": retry_after}, 429)
-                return
-            pwd = qs.get("password", [""])[0]
-            if pwd == DASHBOARD_PWD:
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Set-Cookie', f'token={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax')
-                self.send_header('Cache-Control', 'no-store')
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "token": AUTH_TOKEN}).encode())
-            else:
-                self.send_json({"ok": False, "error": "Mot de passe incorrect"}, 401)
+            # Password in a query string ends up in browser history and proxy logs: POST only.
+            self.send_json({"ok": False, "error": "Utilise POST /api/login avec un corps JSON {\"password\": ...}"}, 405)
             return
 
         if path == "/api/logout":
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
-            self.end_headers()
-            self.wfile.write(json.dumps({"ok": True}).encode())
+            self._handle_logout()
             return
 
         if path in ("/health", "/ready"):
-            payload = build_health_payload()
+            cached_status = poller_state("status", max_age=15)
+            payload = build_health_payload(cached_status.get("raw") if cached_status else None)
             status = 200 if (payload.get('ready') if path == "/ready" else payload.get('ok')) else 503
             self.send_json(payload, status)
             return
@@ -2344,16 +2717,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── API Routes ──
         if path == "/api/status":
-            cached = cache_get("status", 3)
             if_digest = qs.get("if_digest", [""])[0]
+            cached = poller_state("status")
             if not cached:
-                cached = build_status_payload()
-                cache_set("status", cached)
-            # Record stats snapshot for daily tracking
-            try:
-                record_stats_snapshot(cached.get("download_speed", 0), cached.get("upload_speed", 0))
-            except Exception:
-                pass
+                cached = cache_get("status", 3)
+                if not cached:
+                    cached = build_status_payload()
+                    cache_set("status", cached)
             if if_digest and cached.get("digest") == if_digest:
                 self.send_json(unchanged_payload(cached.get("digest"), cached=True))
                 return
@@ -2362,13 +2732,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/downloads":
             include_raw = qs.get("include_raw", ["1"])[0] not in ("0", "false", "no")
             if_digest = qs.get("if_digest", [""])[0]
-            cached = cache_get("downloads", 2)
+            cached = poller_state("downloads")
             if not cached:
-                cached = build_downloads_payload(include_raw=include_raw)
-                cache_set("downloads", cached)
-            elif include_raw and "raw" not in cached:
-                cached = build_downloads_payload(include_raw=True)
-                cache_set("downloads", cached)
+                cached = cache_get("downloads", 2)
+                if not cached or (include_raw and "raw" not in cached):
+                    cached = build_downloads_payload(include_raw=True)
+                    cache_set("downloads", cached)
             if if_digest and cached.get("digest") == if_digest:
                 self.send_json(unchanged_payload(cached.get("digest"), count=cached.get("count", 0), summary=cached.get("summary", {}), cached=True))
                 return
@@ -2384,22 +2753,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not hash_value:
                 self.send_json({"ok": False, "error": "hash requis"}, 400)
                 return
-            raw = run_amulecmd("show dl")
-            downloads = parse_downloads(raw)
+            cached = poller_state("downloads")
+            raw = cached.get("raw") if cached and isinstance(cached.get("raw"), str) else run_amulecmd("show dl")
+            downloads = cached.get("downloads") if cached else parse_downloads(raw)
             detail = get_download_detail(hash_value, raw=raw, downloads=downloads)
             if not detail:
                 self.send_json({"ok": False, "error": "transfert introuvable"}, 404)
                 return
             self.send_json({"ok": True, "download": detail})
 
-        elif path == "/api/add_ed2k":
-            blocked = guard_write_action(self, "add_ed2k")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            link = qs.get("link", [""])[0]
-            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link))
-            self.send_json(payload, status)
+        elif path in WRITE_ACTION_PATHS:
+            # Deprecated: state-changing GET kept for one version (old bookmarklets/scripts). Use POST.
+            self._extra_headers = [("Deprecation", "true"), ("Link", '</README.md>; rel="deprecation"')]
+            self.handle_write_action(path, qs)
 
         elif path == "/api/files":
             cached = cache_get("files", 10)
@@ -2411,105 +2777,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/disk":
             self.send_json(get_disk_info())
 
-        elif path == "/api/pause":
-            blocked = guard_write_action(self, "pause")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            h = qs.get("hash", [""])[0]
-            payload, status = execute_locked_action("pause", lambda: change_transfer_state("pause", h))
-            self.send_json(payload, status)
-
-        elif path == "/api/resume":
-            blocked = guard_write_action(self, "resume")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            h = qs.get("hash", [""])[0]
-            payload, status = execute_locked_action("resume", lambda: change_transfer_state("resume", h))
-            self.send_json(payload, status)
-
-        elif path == "/api/cancel":
-            blocked = guard_write_action(self, "cancel")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            h = qs.get("hash", [""])[0]
-            if not h:
-                payload, status = action_response("cancel", False, "INVALID_INPUT", "Hash requis.", status=400)
-            else:
-                payload, status = execute_locked_action("cancel", lambda: change_transfer_state("cancel", h))
-            self.send_json(payload, status)
-
-        elif path == "/api/connect":
-            blocked = guard_write_action(self, "connect")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            target = qs.get("target", ["all"])[0]  # all, ed2k, kad
-            results = {}
-
-            if target in ("all", "ed2k"):
-                _log("CONNECT ED2K: sending 'connect ed2k'")
-                out1 = run_amulecmd("connect ed2k", timeout=10)
-                results["connect_ed2k"] = out1
-                results["connect_ok"] = "successful" in out1.lower()
-
-                # Wait for handshake then check
-                time.sleep(5)
-                status_raw = run_amulecmd("status", timeout=8)
-                results["status_after"] = status_raw
-
-                # Detect state
-                sl = status_raw.lower()
-                if "now connecting" in sl:
-                    results["ed2k_state"] = "connecting"
-                    # Wait a bit more and re-check
-                    time.sleep(5)
-                    status_raw2 = run_amulecmd("status", timeout=8)
-                    results["status_final"] = status_raw2
-                    sl2 = status_raw2.lower()
-                    if re.search(r'ed2k.*connected', sl2) and "not connected" not in sl2:
-                        results["ed2k_state"] = "connected"
-                    elif "now connecting" in sl2:
-                        results["ed2k_state"] = "connecting"
-                elif re.search(r'ed2k.*connected', sl) and "not connected" not in sl:
-                    results["ed2k_state"] = "connected"
-                else:
-                    results["ed2k_state"] = "disconnected"
-                    # Try specific servers as fallback
-                    _log("CONNECT ED2K: trying specific servers...")
-                    servers_raw = run_amulecmd("show servers", timeout=8)
-                    server_addrs = re.findall(r'((?:\d{1,3}\.){3}\d{1,3}:\d{2,5})', servers_raw)
-                    results["server_attempts"] = []
-                    for addr in server_addrs[:3]:
-                        out = run_amulecmd(f"connect {addr}", timeout=10)
-                        results["server_attempts"].append({"addr": addr, "output": out[:200]})
-                        time.sleep(1)
-                    time.sleep(5)
-                    final = run_amulecmd("status", timeout=8)
-                    results["status_final"] = final
-                    fl = final.lower()
-                    if re.search(r'ed2k.*connected', fl) and "not connected" not in fl:
-                        results["ed2k_state"] = "connected"
-                    elif "now connecting" in fl:
-                        results["ed2k_state"] = "connecting"
-
-                _log(f"CONNECT ED2K final state: {results['ed2k_state']}")
-
-            if target in ("all", "kad"):
-                out_kad = run_amulecmd("connect kad", timeout=10)
-                results["connect_kad"] = out_kad
-
-            cache_clear("status", "servers")
-            self.send_json({"ok": True, "results": results})
-
         elif path == "/api/servers" or path == "/api/server_sources":
-            raw = run_amulecmd("show servers")
+            raw = run_amulecmd_shared("show servers")
             self.send_json({"sources": get_server_sources_payload(), "servers": parse_servers(raw), "raw": raw})
 
         elif path == "/api/stats":
-            self.send_json({"raw": run_amulecmd("statistics")})
+            self.send_json({"raw": run_amulecmd_shared("statistics")})
 
         elif path == "/api/clients":
             cached = cache_get("clients", 5)
@@ -2526,6 +2799,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(unchanged_payload(payload.get("digest"), limit=payload.get("limit", _action_history.maxlen)))
             else:
                 self.send_json(payload)
+
+        elif path == "/api/sessions":
+            self.send_json({"ok": True, "sessions": list_sessions(), "current": _session_id(self._session_token())})
 
         elif path == "/api/app_config":
             self.send_json({"ok": True, "config": get_dashboard_config(), "read_only": is_read_only_enabled()})
@@ -2549,59 +2825,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True, "settings": settings, "dashboard": settings.get("dashboard", {})})
 
         elif path == "/api/kad/status":
-            raw = run_amulecmd("status")
+            cached = poller_state("status")
+            raw = cached.get("raw", "") if cached else run_amulecmd("status")
             # amulecmd prints "Kad: Connected (ok|firewalled)" / "Kad: Not connected" / "Kad: Not running"
             kad_ok = bool(re.search(r'kad:\s*connected', raw, re.I))
             ed2k_ok = bool(re.search(r'ed2k:\s*connected to', raw, re.I))
             self.send_json({"kad_connected": kad_ok, "ed2k_connected": ed2k_ok, "raw": raw})
-
-        elif path == "/api/kad/reconnect":
-            blocked = guard_write_action(self, "reconnect")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            out1 = run_amulecmd("connect kad")
-            out2 = run_amulecmd("connect ed2k")
-            cache_clear("status")
-            self.send_json({"ok": True, "output": out1 + "\n" + out2})
-
-        elif path == "/api/scan_now":
-            blocked = guard_write_action(self, "scan_now")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            # Trigger an immediate source scan
-            def do_scan():
-                try:
-                    subprocess.run(["/opt/scripts/source-scanner.sh"], capture_output=True, timeout=120)
-                except Exception:
-                    pass
-                cache_clear("status", "servers")
-            threading.Thread(target=do_scan, daemon=True).start()
-            self.send_json({"ok": True, "message": "Scan lancé en arrière-plan"})
-
-        elif path == "/api/source_boost":
-            blocked = guard_write_action(self, "source_boost")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            # Read last run status
-            last_run = None
-            try:
-                boost_status_path = os.path.join(AMULE_HOME, ".source-boost", "last-run.json")
-                with open(boost_status_path, "r") as _f:
-                    last_run = json.load(_f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass
-            # Trigger boost in background
-            def do_boost():
-                try:
-                    subprocess.run(["/opt/scripts/source-boost.sh"], capture_output=True, timeout=180)
-                except Exception:
-                    pass
-                cache_clear("status", "downloads", "clients")
-            threading.Thread(target=do_boost, daemon=True).start()
-            self.send_json({"ok": True, "message": "Source Boost lancé en arrière-plan", "last_run": last_run})
 
         elif path == "/api/source_boost/status":
             last_run = None
@@ -2715,16 +2944,211 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
+    def handle_write_action(self, path, qs):
+        """Write actions shared by POST (JSON body) and deprecated GET (query string).
+
+        ``qs`` is a dict of lists like ``parse_qs`` output. Returns True when the path was handled.
+        """
+        if path == "/api/add_ed2k":
+            blocked = guard_write_action(self, "add_ed2k")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            link = qs.get("link", [""])[0]
+            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link))
+            self.send_json(payload, status)
+
+        elif path == "/api/pause":
+            blocked = guard_write_action(self, "pause")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            h = qs.get("hash", [""])[0]
+            payload, status = execute_locked_action("pause", lambda: change_transfer_state("pause", h))
+            self.send_json(payload, status)
+
+        elif path == "/api/resume":
+            blocked = guard_write_action(self, "resume")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            h = qs.get("hash", [""])[0]
+            payload, status = execute_locked_action("resume", lambda: change_transfer_state("resume", h))
+            self.send_json(payload, status)
+
+        elif path == "/api/cancel":
+            blocked = guard_write_action(self, "cancel")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            h = qs.get("hash", [""])[0]
+            if not h:
+                payload, status = action_response("cancel", False, "INVALID_INPUT", "Hash requis.", status=400)
+            else:
+                payload, status = execute_locked_action("cancel", lambda: change_transfer_state("cancel", h))
+            self.send_json(payload, status)
+
+        elif path == "/api/connect":
+            blocked = guard_write_action(self, "connect")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            target = qs.get("target", ["all"])[0]  # all, ed2k, kad
+            results = {}
+
+            if target in ("all", "ed2k"):
+                _log("CONNECT ED2K: sending 'connect ed2k'")
+                out1 = run_amulecmd("connect ed2k", timeout=10)
+                results["connect_ed2k"] = out1
+                results["connect_ok"] = "successful" in out1.lower()
+
+                # Wait for handshake then check
+                time.sleep(5)
+                status_raw = run_amulecmd("status", timeout=8)
+                results["status_after"] = status_raw
+
+                # Detect state
+                sl = status_raw.lower()
+                if "now connecting" in sl:
+                    results["ed2k_state"] = "connecting"
+                    # Wait a bit more and re-check
+                    time.sleep(5)
+                    status_raw2 = run_amulecmd("status", timeout=8)
+                    results["status_final"] = status_raw2
+                    sl2 = status_raw2.lower()
+                    if re.search(r'ed2k.*connected', sl2) and "not connected" not in sl2:
+                        results["ed2k_state"] = "connected"
+                    elif "now connecting" in sl2:
+                        results["ed2k_state"] = "connecting"
+                elif re.search(r'ed2k.*connected', sl) and "not connected" not in sl:
+                    results["ed2k_state"] = "connected"
+                else:
+                    results["ed2k_state"] = "disconnected"
+                    # Try specific servers as fallback
+                    _log("CONNECT ED2K: trying specific servers...")
+                    servers_raw = run_amulecmd("show servers", timeout=8)
+                    server_addrs = re.findall(r'((?:\d{1,3}\.){3}\d{1,3}:\d{2,5})', servers_raw)
+                    results["server_attempts"] = []
+                    for addr in server_addrs[:3]:
+                        out = run_amulecmd(f"connect {addr}", timeout=10)
+                        results["server_attempts"].append({"addr": addr, "output": out[:200]})
+                        time.sleep(1)
+                    time.sleep(5)
+                    final = run_amulecmd("status", timeout=8)
+                    results["status_final"] = final
+                    fl = final.lower()
+                    if re.search(r'ed2k.*connected', fl) and "not connected" not in fl:
+                        results["ed2k_state"] = "connected"
+                    elif "now connecting" in fl:
+                        results["ed2k_state"] = "connecting"
+
+                _log(f"CONNECT ED2K final state: {results['ed2k_state']}")
+
+            if target in ("all", "kad"):
+                out_kad = run_amulecmd("connect kad", timeout=10)
+                results["connect_kad"] = out_kad
+
+            cache_clear("status", "servers")
+            self.send_json({"ok": True, "results": results})
+
+        elif path == "/api/kad/reconnect":
+            blocked = guard_write_action(self, "reconnect")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            out1 = run_amulecmd("connect kad")
+            out2 = run_amulecmd("connect ed2k")
+            cache_clear("status")
+            self.send_json({"ok": True, "output": out1 + "\n" + out2})
+
+        elif path == "/api/scan_now":
+            blocked = guard_write_action(self, "scan_now")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            # Trigger an immediate source scan
+            def do_scan():
+                try:
+                    subprocess.run(["/opt/scripts/source-scanner.sh"], capture_output=True, timeout=120)
+                except Exception:
+                    pass
+                cache_clear("status", "servers")
+            threading.Thread(target=do_scan, daemon=True).start()
+            self.send_json({"ok": True, "message": "Scan lancé en arrière-plan"})
+
+        elif path == "/api/source_boost":
+            blocked = guard_write_action(self, "source_boost")
+            if blocked:
+                self.send_json(*blocked)
+                return
+            # Read last run status
+            last_run = None
+            try:
+                boost_status_path = os.path.join(AMULE_HOME, ".source-boost", "last-run.json")
+                with open(boost_status_path, "r") as _f:
+                    last_run = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            # Trigger boost in background
+            def do_boost():
+                try:
+                    subprocess.run(["/opt/scripts/source-boost.sh"], capture_output=True, timeout=180)
+                except Exception:
+                    pass
+                cache_clear("status", "downloads", "clients")
+            threading.Thread(target=do_boost, daemon=True).start()
+            self.send_json({"ok": True, "message": "Source Boost lancé en arrière-plan", "last_run": last_run})
+
+        else:
+            return False
+        return True
+
     def do_POST(self):
         parsed = urlparse(self.path)
+        try:
+            data = self.read_json_body()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_json({"error": "JSON invalide"}, 400)
+            return
+        if not isinstance(data, dict):
+            data = {}
+
+        if parsed.path == "/api/login":
+            self._handle_login(data.get("password", ""))
+            return
+
         if not self.check_auth():
             self.send_json({"error": "unauthorized"}, 401); return
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode() if length else ""
-        try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            self.send_json({"error": "JSON invalide"}, 400)
+
+        if parsed.path == "/api/logout":
+            self._handle_logout()
+            return
+
+        if parsed.path in WRITE_ACTION_PATHS:
+            params = {}
+            for key, value in data.items():
+                if value is None or isinstance(value, (list, dict)):
+                    continue
+                params[str(key)] = [str(value)]
+            if parsed.path == "/api/add_ed2k" and "link" not in params and "text" in params:
+                params["link"] = params["text"]
+            self.handle_write_action(parsed.path, params)
+            return
+
+        if parsed.path == "/api/sessions/create":
+            # API token for the browser extension / scripts: never expires until revoked
+            label = str(data.get("label") or "extension").strip()[:60]
+            token = create_session("api", label, get_client_ip(self))
+            self.send_json({"ok": True, "token": token, "id": _session_id(token), "label": label})
+            return
+
+        if parsed.path == "/api/sessions/revoke":
+            session_id = str(data.get("id") or "").strip()
+            if not session_id:
+                self.send_json({"ok": False, "error": "id requis"}, 400)
+                return
+            ok = revoke_session_by_id(session_id)
+            self.send_json({"ok": ok}, 200 if ok else 404)
             return
 
         if parsed.path == "/api/action_history/clear":
@@ -2741,14 +3165,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             hashes = data.get("hashes") if isinstance(data.get("hashes"), list) else []
             payload, status = execute_locked_action(f"bulk_{action or 'unknown'}", lambda: change_transfer_state_bulk(action, hashes))
             self.send_json(payload, status)
-            return
-
-        if parsed.path == "/api/logout":
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
-            self.end_headers()
-            self.wfile.write(json.dumps({"ok": True}).encode())
             return
 
         if parsed.path == "/api/dashboard_config":
@@ -2786,11 +3202,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(*blocked)
             return
 
-        if parsed.path == "/api/add_ed2k":
-            link_blob = str(data.get("link") or data.get("text") or "")
-            payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
-            self.send_json(payload, status)
-        elif parsed.path == "/api/server_sources/import":
+        if parsed.path == "/api/server_sources/import":
             sources = data.get("sources") or []
             custom_url = str(data.get("custom_url", "")).strip()
             if custom_url:
@@ -2911,7 +3323,7 @@ button:hover{background:#4f46e5}
 <input type="password" id="p" placeholder="Mot de passe" autofocus onkeydown="if(event.key==='Enter')go()">
 <button onclick="go()">Connexion</button></div>
 <script>async function go(){const p=document.getElementById('p').value;
-const r=await fetch('/api/login?password='+encodeURIComponent(p));const d=await r.json();
+const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});const d=await r.json();
 if(d.ok){if(location.pathname==='/')location.reload();else window.location='/'+(location.hash||'')}else document.getElementById('e').style.display='block'}</script>
 </body></html>"""
         self.send_response(200)
@@ -2921,6 +3333,22 @@ if(d.ok){if(location.pathname==='/')location.reload();else window.location='/'+(
         self.wfile.write(html)
 
 
+class DashboardServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 if __name__ == "__main__":
     print(f"[DASHBOARD] Port {DASHBOARD_PORT} — en attente de connexions...")
-    http.server.HTTPServer(("0.0.0.0", DASHBOARD_PORT), Handler).serve_forever()
+    start_poller()
+    server = DashboardServer(("0.0.0.0", DASHBOARD_PORT), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        poller = get_poller()
+        if poller is not None:
+            poller.stop()
+        flush_stats()
+        server.server_close()

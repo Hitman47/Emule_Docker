@@ -1,6 +1,9 @@
 import importlib.util
 import json
+import http.client
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -20,6 +23,10 @@ class DashboardRegressionTests(unittest.TestCase):
         server.SETTINGS_FILE = str(base / 'settings.json')
         server.HISTORY_FILE = str(base / 'history.json')
         server.STATS_FILE = str(base / 'stats.json')
+        server.SESSIONS_FILE = str(base / 'sessions.json')
+        server._sessions = {}
+        server._stats_mem.update({"data": None, "path": None, "dirty": False, "last_flush": 0.0})
+        server.invalidate_settings_cache()
         server.SERVER_SOURCES = server.get_server_sources_from_settings()
         server.clear_action_history_store()
 
@@ -297,5 +304,169 @@ class DashboardRegressionTests(unittest.TestCase):
         self.assertIn('resume AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', command_log)
         self.assertIn('cancel AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', command_log)
 
+
+class FakeHandler:
+    def __init__(self, peer, headers=None):
+        self.client_address = (peer, 12345)
+        self.headers = headers or {}
+
+
+class Phase3Tests(unittest.TestCase):
+    setUp = DashboardRegressionTests.setUp
+    tearDown = DashboardRegressionTests.tearDown
+    fixture = DashboardRegressionTests.fixture
+
+    def test_sessions_create_validate_revoke_and_persist(self):
+        token = server.create_session('browser', 'ua', '10.0.0.5')
+        self.assertTrue(server.validate_session(token))
+        self.assertFalse(server.validate_session('nope'))
+        self.assertFalse(server.validate_session(''))
+        # Persisted: a fresh load sees it
+        server._sessions = {}
+        server._load_sessions()
+        self.assertTrue(server.validate_session(token))
+        listed = server.list_sessions()
+        self.assertEqual(len(listed), 1)
+        self.assertTrue(server.revoke_session_by_id(listed[0]['id']))
+        self.assertFalse(server.validate_session(token))
+
+    def test_browser_session_expires_but_api_token_does_not(self):
+        browser = server.create_session('browser')
+        api = server.create_session('api', 'ext')
+        old = int(time.time()) - server.SESSION_TTL_SECONDS - 10
+        server._sessions[browser]['created'] = old
+        server._sessions[api]['created'] = old
+        self.assertFalse(server.validate_session(browser))
+        self.assertTrue(server.validate_session(api))
+
+    def test_password_matches_is_exact(self):
+        with mock.patch.object(server, 'DASHBOARD_PWD', 'secret'):
+            self.assertTrue(server.password_matches('secret'))
+            self.assertFalse(server.password_matches('secret '))
+            self.assertFalse(server.password_matches(None))
+
+    def test_client_ip_ignores_forwarded_for_unless_trusted_proxy(self):
+        h = FakeHandler('192.168.1.20', {'X-Forwarded-For': '1.2.3.4'})
+        with mock.patch.object(server, 'TRUSTED_PROXIES', []):
+            self.assertEqual(server.get_client_ip(h), '192.168.1.20')
+        with mock.patch.object(server, 'TRUSTED_PROXIES', server._parse_trusted_proxies('192.168.1.0/24')):
+            self.assertEqual(server.get_client_ip(h), '1.2.3.4')
+        h2 = FakeHandler('10.9.9.9', {'X-Forwarded-For': '1.2.3.4'})
+        with mock.patch.object(server, 'TRUSTED_PROXIES', server._parse_trusted_proxies('192.168.1.0/24')):
+            self.assertEqual(server.get_client_ip(h2), '10.9.9.9')
+
+    def test_singleflight_shares_one_amulecmd_run(self):
+        calls = []
+
+        def slow_run(command, timeout=30):
+            calls.append(command)
+            time.sleep(0.2)
+            return 'OUT'
+
+        results = []
+        with mock.patch.object(server, 'run_amulecmd', side_effect=slow_run):
+            threads = [threading.Thread(target=lambda: results.append(server.run_amulecmd_shared('show servers'))) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(results, ['OUT'] * 5)
+        self.assertEqual(len(calls), 1)
+
+    def test_stats_snapshot_uses_real_dt(self):
+        server.record_stats_snapshot(100.0, 10.0, dt_seconds=2.0)
+        server.record_stats_snapshot(100.0, 10.0, dt_seconds=8.0)
+        day = server._load_stats()['daily'][time.strftime('%Y-%m-%d')]
+        self.assertEqual(day['dl_bytes'], 100 * 1024 * 10)
+        self.assertEqual(day['ul_bytes'], 10 * 1024 * 10)
+        self.assertEqual(day['samples'], 2)
+        server.flush_stats()
+        with open(server.STATS_FILE) as f:
+            self.assertEqual(json.load(f)['daily'][time.strftime('%Y-%m-%d')]['samples'], 2)
+
+    def test_http_login_post_only_and_write_actions_via_post(self):
+        fixture_status = self.fixture('status_connected.txt')
+        fixture_dl = self.fixture('downloads_before.txt')
+
+        def fake_run(command, timeout=30):
+            if command == 'status':
+                return fixture_status
+            if command == 'show dl':
+                return fixture_dl
+            if command.startswith('pause '):
+                return 'OK'
+            return ''
+
+        srv = server.DashboardServer(('127.0.0.1', 0), server.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+
+        def req(method, path, body=None, headers=None):
+            c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+            hdrs = dict(headers or {})
+            data = None
+            if body is not None:
+                data = json.dumps(body).encode()
+                hdrs['Content-Type'] = 'application/json'
+            c.request(method, path, body=data, headers=hdrs)
+            r = c.getresponse()
+            raw = r.read()
+            try:
+                payload = json.loads(raw.decode('utf-8'))
+            except Exception:
+                payload = raw
+            return r.status, dict(r.getheaders()), payload
+
+        try:
+            with mock.patch.object(server, 'DASHBOARD_PWD', 'pw'), \
+                 mock.patch.object(server, 'run_amulecmd', side_effect=fake_run), \
+                 mock.patch.object(server.time, 'sleep', return_value=None):
+                # GET login is refused (password would land in logs/history)
+                status, _, _ = req('GET', '/api/login?password=pw')
+                self.assertEqual(status, 405)
+                # Unauthenticated / serves the login form in place (fragment survives)
+                status, headers, body = req('GET', '/')
+                self.assertEqual(status, 200)
+                self.assertIn(b'Mot de passe', body)
+                # Wrong password
+                status, _, _ = req('POST', '/api/login', {'password': 'nope'})
+                self.assertEqual(status, 401)
+                # Right password -> random session cookie
+                status, headers, body = req('POST', '/api/login', {'password': 'pw'})
+                self.assertEqual(status, 200)
+                cookie = headers['Set-Cookie'].split(';')[0]
+                token = cookie.split('=', 1)[1]
+                self.assertNotIn('token', body)
+                self.assertGreater(len(token), 30)
+                auth = {'Cookie': cookie}
+                # Reads work with the cookie and with a Bearer header
+                status, _, payload = req('GET', '/api/status', headers=auth)
+                self.assertEqual(status, 200)
+                self.assertEqual(payload['ed2k_status'], 'low_id')
+                status, _, _ = req('GET', '/api/status', headers={'Authorization': f'Bearer {token}'})
+                self.assertEqual(status, 200)
+                # Query-string tokens are no longer accepted
+                status, _, _ = req('GET', f'/api/status?token={token}')
+                self.assertEqual(status, 401)
+                # Write action via POST
+                status, _, payload = req('POST', '/api/pause', {'hash': 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'}, headers=auth)
+                self.assertIn(status, (200, 502))
+                self.assertEqual(payload['action'], 'pause')
+                # Same action via GET still works but is flagged deprecated
+                status, headers, payload = req('GET', '/api/pause?hash=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', headers=auth)
+                self.assertEqual(payload['action'], 'pause')
+                self.assertEqual(headers.get('Deprecation'), 'true')
+                # Logout revokes the session server-side
+                status, _, _ = req('POST', '/api/logout', headers=auth)
+                self.assertEqual(status, 200)
+                status, _, _ = req('GET', '/api/status', headers=auth)
+                self.assertEqual(status, 401)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 if __name__ == '__main__':
     unittest.main()
+

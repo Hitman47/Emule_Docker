@@ -286,7 +286,7 @@ body.ed2k-drop::after{content:'Déposer les liens ed2k ici';position:fixed;inset
 
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" onclick="connectED2K()">🔌 Reconnecter ED2K</button>
-      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect?target=kad')">🔌 Reconnecter Kad</button>
+      <button class="btn btn-ghost btn-sm" onclick="apiCall('/api/connect', {data: {target: 'kad'}})">🔌 Reconnecter Kad</button>
     </div>
     <div id="connectResult" class="msg" style="margin-top:8px"></div>
   </div>
@@ -881,10 +881,19 @@ function setButtonPending(btn, pending, pendingText = '...') {
   }
 }
 
+function postOpts(data = {}) {
+  return {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)};
+}
+
+async function apiPost(path, data = {}) {
+  return api(path, postOpts(data));
+}
+
 async function apiCall(path, opts = {}) {
-  const {button = null, pendingText = 'Action...', successRefresh = null} = opts;
+  const {button = null, pendingText = 'Action...', successRefresh = null, data = null} = opts;
   setButtonPending(button, true, pendingText);
-  const d = await api(path);
+  // Write actions are POST; pass data (even {}) to force POST.
+  const d = await api(path, data ? postOpts(data) : {});
   setButtonPending(button, false);
   if (d && d.ok) {
     showToast('ok', getActionMessage(d, 'Commande exécutée'));
@@ -1460,14 +1469,13 @@ async function handleSelectedTransferAction(action, btn = null) {
 async function handleTransferAction(action, hash, btn = null) {
   if (!ensureWritable('Cette action transfert')) return null;
   if (action === 'cancel' && !confirm(buildTransferSelectionSummary(action, [hash]))) return null;
-  const endpoint = action === 'cancel' ? '/api/cancel?hash=' : '/api/' + action + '?hash=';
   const labels = {
     pause: 'Pause...',
     resume: 'Reprise...',
     cancel: 'Suppression...',
   };
   setButtonPending(btn, true, labels[action] || 'Action...');
-  const d = await api(endpoint + encodeURIComponent(hash));
+  const d = await apiPost('/api/' + action, {hash});
   setButtonPending(btn, false);
   renderTransferActionReport(d, action);
   if (d?.ok) {
@@ -1490,6 +1498,7 @@ async function handleBulkTransferAction(action, btn = null) {
     button: btn,
     pendingText: action === 'pause' ? 'Pause...' : 'Reprise...',
     successRefresh: loadDownloads,
+    data: {},
   });
   return d;
 }
@@ -1497,7 +1506,7 @@ async function handleBulkTransferAction(action, btn = null) {
 // ── Source Boost ──
 async function triggerSourceBoost(btn) {
   if (btn) { btn.disabled = true; btn.textContent = '🚀 Boost en cours...'; }
-  const d = await api('/api/source_boost');
+  const d = await apiPost('/api/source_boost');
   if (d?.ok) {
     showToast('ok', 'Source Boost lancé — rotation serveur, recherche Kad, refresh sources');
   } else {
@@ -2095,7 +2104,7 @@ async function kadStatus() {
 async function kadReconnect() {
   if (!ensureWritable('La reconnexion')) return;
   showToast('info', 'Reconnexion en cours...');
-  const d = await api('/api/kad/reconnect');
+  const d = await apiPost('/api/kad/reconnect');
   if (d && d.ok) {
     showToast('ok', 'Commande de reconnexion envoyée');
     setTimeout(kadStatus, 5000);
@@ -2126,8 +2135,8 @@ async function loadStallTimeout() {
 async function forceReconnectNow() {
   if (!ensureWritable('La reconnexion')) return;
   showToast('info', 'Reconnexion forcée...');
-  await api('/api/kad/reconnect');
-  await api('/api/connect?target=ed2k');
+  await apiPost('/api/kad/reconnect');
+  await apiPost('/api/connect', {target: 'ed2k'});
   showToast('ok', 'Reconnexion Kad + changement serveur ED2K lancés');
 }
 
@@ -2135,7 +2144,7 @@ async function forceReconnectNow() {
 async function scanNow() {
   if (!ensureWritable('Le scan')) return;
   showToast('info', 'Scan des sources lancé (quelques secondes)...');
-  const d = await api('/api/scan_now');
+  const d = await apiPost('/api/scan_now');
   if (d && d.ok) showToast('ok', d.message || 'Scan lancé');
   else showToast('err', 'Erreur');
 }
@@ -2150,7 +2159,7 @@ async function connectED2K() {
   }
   showToast('info', 'Connexion ED2K en cours...');
 
-  const d = await api('/api/connect?target=ed2k');
+  const d = await apiPost('/api/connect', {target: 'ed2k'});
   if (!d) {
     if (msg) { msg.className = 'msg err show'; msg.textContent = 'Erreur de communication'; }
     return;
