@@ -106,12 +106,12 @@ log "── AMULE STATUS ──"
 STATUS_RAW=$(amulecmd_run "status")
 
 # ED2K
+# amulecmd: "eD2k: Connected to <name> <ip> with LowID|HighID" / "eD2k: Now connecting" / "eD2k: Not connected"
 ED2K_STATUS="disconnected"
 ED2K_SERVER=""
 ED2K_ID=""
-echo "$STATUS_RAW" | grep -qi "ed2k.*not connected" && ED2K_STATUS="disconnected"
-echo "$STATUS_RAW" | grep -qi "ed2k.*now connecting" && ED2K_STATUS="connecting"
-if echo "$STATUS_RAW" | grep -qi "ed2k.*connected to"; then
+echo "$STATUS_RAW" | grep -qi "ed2k: *now connecting" && ED2K_STATUS="connecting"
+if echo "$STATUS_RAW" | grep -qi "ed2k: *connected to"; then
     ED2K_STATUS="connected"
     ED2K_SERVER=$(echo "$STATUS_RAW" | grep -i "ed2k.*connected to" | head -1 | sed 's/.*connected to //i')
     echo "$STATUS_RAW" | grep -qi "high.*id\|highid" && ED2K_ID="HighID"
@@ -121,11 +121,11 @@ fi
 log "  ED2K: $ED2K_STATUS | Server: $ED2K_SERVER | ID: $ED2K_ID"
 
 # Kad
+# amulecmd: "Kad: Connected (ok)" / "Kad: Connected (firewalled)" / "Kad: Not connected" (running, bootstrapping) / "Kad: Not running"
 KAD_STATUS="disconnected"
-echo "$STATUS_RAW" | grep -qi "kad.*not connected\|kad.*not running\|kad.*disconnected" && KAD_STATUS="disconnected"
-echo "$STATUS_RAW" | grep -qi "kad.*firewalled" && KAD_STATUS="firewalled"
-echo "$STATUS_RAW" | grep -qi "kad.*running\|kad.*connected" && KAD_STATUS="connected"
-echo "$STATUS_RAW" | grep -qi "kad.*connecting\|kad.*bootstrapping" && KAD_STATUS="connecting"
+echo "$STATUS_RAW" | grep -qi "kad: *not connected" && KAD_STATUS="connecting"
+echo "$STATUS_RAW" | grep -qi "kad: *connected (ok)" && KAD_STATUS="connected"
+echo "$STATUS_RAW" | grep -qi "kad: *connected (firewalled)" && KAD_STATUS="firewalled"
 log "  Kad: $KAD_STATUS"
 
 # Speeds

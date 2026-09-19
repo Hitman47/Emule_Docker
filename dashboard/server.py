@@ -15,7 +15,7 @@ import re
 import hashlib
 import threading
 import html
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -241,8 +241,7 @@ def unchanged_payload(digest, **extra):
 
 
 # ── Action state ──
-_action_locks = {name: threading.Lock() for name in ("download", "add_ed2k", "pause", "resume", "cancel", "favorite_download")}
-_last_search_context = {"query": "", "type": "kad", "results": [], "timestamp": 0}
+_action_locks = {name: threading.Lock() for name in ("add_ed2k", "pause", "resume", "cancel")}
 
 
 # Recent action history for UI / diagnostics
@@ -348,16 +347,6 @@ def clear_action_history_store():
     _save_history(history)
 
 
-def set_last_search_context(query, search_type, results):
-    global _last_search_context
-    _last_search_context = {
-        "query": query,
-        "type": search_type,
-        "results": results or [],
-        "timestamp": time.time(),
-    }
-
-
 def action_response(action, ok, code, message, confirmed=False, status=None, data=None):
     payload = {
         "ok": bool(ok),
@@ -384,65 +373,6 @@ def compact_transfer_result(item):
         "ok": bool(item.get("ok")),
     }
     return payload
-
-
-def compact_search_download_result(item):
-    if not isinstance(item, dict):
-        return {}
-    payload = {
-        "id": int(item.get("id", 0) or 0),
-        "name": item.get("name", ""),
-        "size": item.get("size", ""),
-        "sources": int(item.get("sources", 0) or 0),
-        "code": item.get("code", "UNKNOWN"),
-        "message": item.get("message", ""),
-        "hash": item.get("hash", ""),
-        "confirmed": bool(item.get("confirmed")),
-        "ok": bool(item.get("ok")),
-    }
-    return payload
-
-
-def summarize_search_download_results(results):
-    overview = {
-        "total": 0,
-        "success": 0,
-        "already": 0,
-        "failed": 0,
-        "missing": 0,
-        "counts_by_code": {},
-        "confirmed_ids": [],
-        "failed_ids": [],
-        "missing_ids": [],
-        "success_items": [],
-        "already_items": [],
-        "failed_items": [],
-    }
-    for item in results or []:
-        compact = compact_search_download_result(item)
-        code = compact.get("code", "UNKNOWN") or "UNKNOWN"
-        overview["total"] += 1
-        overview["counts_by_code"][code] = overview["counts_by_code"].get(code, 0) + 1
-        if code == "SUCCESS":
-            overview["success"] += 1
-            if compact.get("id"):
-                overview["confirmed_ids"].append(compact.get("id"))
-            overview["success_items"].append(compact)
-        elif code == "ALREADY_EXISTS":
-            overview["already"] += 1
-            overview["already_items"].append(compact)
-        elif code == "RESULT_NOT_FOUND":
-            overview["missing"] += 1
-            if compact.get("id"):
-                overview["missing_ids"].append(compact.get("id"))
-            overview["failed_items"].append(compact)
-        else:
-            overview["failed"] += 1
-            if compact.get("id"):
-                overview["failed_ids"].append(compact.get("id"))
-            overview["failed_items"].append(compact)
-    return overview
-
 
 
 def summarize_transfer_action_results(results):
@@ -512,8 +442,6 @@ def record_action_event(payload, http_status):
             event["target"] = str(data["link"])[:140]
         elif data.get("hash"):
             event["target"] = data["hash"]
-        elif data.get("query"):
-            event["target"] = data["query"]
     with _action_history_lock:
         _action_history.appendleft(event)
         snapshot = list(_action_history)
@@ -1351,93 +1279,6 @@ def build_action_history_payload(limit=30):
     }
 
 
-def parse_search_results(raw):
-    """Parse amulecmd 'results' output.
-
-    Supports table outputs, alternative parenthesized outputs, decimal commas
-    and Unicode filenames. Returned results are sorted by sources desc.
-    """
-    results = []
-    seen_ids = set()
-    for line in str(raw or '').split("\n"):
-        line = line.strip()
-        if not line or line.startswith("---") or line.startswith("Nr.") or line.startswith("Filename"):
-            continue
-
-        m_table = re.match(r'^(\d+)\.\s+(.+?)\s{2,}([\d.,]+)\s+(\d+)\s*$', line)
-        if m_table:
-            size_mb = parse_number_loose(m_table.group(3), 0.0) or 0.0
-            size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
-            item = {
-                "id": int(m_table.group(1)),
-                "name": m_table.group(2).strip(),
-                "size": size_str,
-                "size_mb": size_mb,
-                "sources": int(m_table.group(4))
-            }
-            if item['id'] not in seen_ids:
-                seen_ids.add(item['id'])
-                results.append(item)
-            continue
-
-        m_paren = re.match(r'^(\d+)[.)]\s+(.+?)\s+([\d.,]+\s*[KMGT]?i?[Bo])\s+Source[s]?:?\s*(\d+)', line, re.I)
-        if m_paren:
-            item = {
-                "id": int(m_paren.group(1)),
-                "name": m_paren.group(2).strip(),
-                "size": m_paren.group(3).replace(',', '.'),
-                "size_mb": round((size_to_bytes(m_paren.group(3).replace(',', '.')) or 0) / (1024 ** 2), 2),
-                "sources": int(m_paren.group(4))
-            }
-            if item['id'] not in seen_ids:
-                seen_ids.add(item['id'])
-                results.append(item)
-            continue
-
-        m_min = re.match(r'^(\d+)[.)]\s+(.+)', line)
-        if m_min:
-            rest = m_min.group(2).strip()
-            m_tail = re.search(r'^(.+?)\s{2,}([\d.,]+)\s+(\d+)\s*$', rest)
-            if m_tail:
-                size_mb = parse_number_loose(m_tail.group(2), 0.0) or 0.0
-                size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
-                item = {
-                    "id": int(m_min.group(1)),
-                    "name": m_tail.group(1).strip(),
-                    "size": size_str,
-                    "size_mb": size_mb,
-                    "sources": int(m_tail.group(3))
-                }
-            else:
-                m_tail2 = re.search(r'^(.+?)\s+([\d.,]{3,})\s+(\d+)\s*$', rest)
-                if m_tail2 and (parse_number_loose(m_tail2.group(2), 0) or 0) > 1:
-                    size_mb = parse_number_loose(m_tail2.group(2), 0.0) or 0.0
-                    size_str = f"{size_mb/1024:.1f} GB" if size_mb > 1024 else f"{size_mb:.1f} MB"
-                    item = {
-                        "id": int(m_min.group(1)),
-                        "name": m_tail2.group(1).strip(),
-                        "size": size_str,
-                        "size_mb": size_mb,
-                        "sources": int(m_tail2.group(3))
-                    }
-                else:
-                    item = {
-                        "id": int(m_min.group(1)),
-                        "name": rest,
-                        "size": "",
-                        "size_mb": 0.0,
-                        "sources": 0
-                    }
-            if item['id'] not in seen_ids:
-                seen_ids.add(item['id'])
-                results.append(item)
-
-    results.sort(key=lambda x: (x.get("sources", 0), x.get("size_mb", 0)), reverse=True)
-    _log(f"parse_search_results: {len(results)} results parsed")
-    return results
-
-
-
 def parse_uploads(raw):
     """Parse amulecmd 'show ul' output to extract connected upload clients."""
     clients = []
@@ -1561,140 +1402,17 @@ def list_files(directory):
 
 
 # ══════════════════════════════════════════
-# Search History & Favorites
+# Action history persistence
 # ══════════════════════════════════════════
 HISTORY_FILE = os.path.join(AMULE_HOME, "dashboard-history.json")
-MAX_SEARCH_HISTORY = 50
-MAX_FAVORITES = 200
-MAX_SAVED_SEARCHES = 40
-APP_EXPORT_VERSION = 1
-
-
-def _favorite_name_from_link(link):
-    link = str(link or "").strip()
-    m = re.match(r'^ed2k://\|search_result\|\d+\|(.+?)\|/$', link, re.I)
-    if m:
-        return unquote(m.group(1))
-    parsed = parse_ed2k_link(link)
-    if parsed:
-        return parsed.get("name", "")
-    return ""
-
-
-def _favorite_search_key(name, query, search_type, size=""):
-    return f"search::{search_type.strip().lower()}::{query.strip().lower()}::{name.strip().lower()}::{str(size or '').strip().lower()}"
-
-
-def favorite_dedupe_key(item):
-    item = item or {}
-    kind = str(item.get("kind") or "").strip().lower()
-    link = str(item.get("link") or "").strip()
-    name = str(item.get("name") or "").strip()
-    if not name and link:
-        name = _favorite_name_from_link(link)
-    if kind == "search_result" or link.lower().startswith("ed2k://|search_result|"):
-        query = str(item.get("query") or "").strip()
-        search_type = str(item.get("search_type") or item.get("type") or "kad").strip().lower() or "kad"
-        return _favorite_search_key(name, query, search_type, item.get("size", ""))
-    if link:
-        return f"link::{link.lower()}"
-    return ""
-
-
-def normalize_favorite_entry(item):
-    if not isinstance(item, dict):
-        return None
-    link = str(item.get("link") or "").strip()
-    name = str(item.get("name") or "").strip()
-    if not name and link:
-        name = _favorite_name_from_link(link)
-    kind = str(item.get("kind") or "").strip().lower()
-    if not kind:
-        if link.lower().startswith("ed2k://|search_result|") or item.get("query"):
-            kind = "search_result"
-        elif link.lower().startswith("ed2k://"):
-            kind = "ed2k_link"
-    if kind not in ("ed2k_link", "search_result"):
-        kind = "ed2k_link" if link.lower().startswith("ed2k://") else "search_result"
-    query = str(item.get("query") or "").strip()
-    search_type = str(item.get("search_type") or item.get("type") or "kad").strip().lower() or "kad"
-    added = str(item.get("added") or "").strip() or time.strftime("%Y-%m-%d %H:%M")
-    try:
-        created_ts = int(item.get("created_ts") or 0)
-    except Exception:
-        created_ts = 0
-    if created_ts <= 0:
-        created_ts = int(time.time())
-    try:
-        sources = int(item.get("sources", 0) or 0)
-    except Exception:
-        sources = 0
-    size = str(item.get("size") or "").strip()
-    try:
-        size_mb = float(item.get("size_mb", 0) or 0)
-    except Exception:
-        size_mb = 0.0
-    if not size_mb and size:
-        size_bytes = size_to_bytes(size)
-        if size_bytes:
-            size_mb = round(size_bytes / (1024 * 1024), 3)
-    else:
-        size_bytes = size_to_bytes(size)
-    base = {
-        "kind": kind,
-        "name": name,
-        "link": link,
-        "size": size,
-        "size_mb": size_mb,
-        "sources": sources,
-        "added": added,
-        "created_ts": created_ts,
-        "query": query,
-        "search_type": search_type,
-    }
-    dedupe = favorite_dedupe_key(base)
-    favorite_id = str(item.get("favorite_id") or item.get("id") or "").strip()
-    if not favorite_id:
-        favorite_id = hashlib.sha1((dedupe or repr(base)).encode("utf-8", errors="ignore")).hexdigest()[:12]
-    base["favorite_id"] = favorite_id
-    if size_bytes:
-        base["size_bytes"] = int(size_bytes)
-    return base if (base.get("link") or base.get("query")) else None
-
-
-def get_favorites():
-    h = _load_history()
-    favorites = []
-    for item in h.get("favorites", []):
-        norm = normalize_favorite_entry(item)
-        if norm:
-            favorites.append(norm)
-    favorites.sort(key=lambda x: (-(int(x.get("created_ts") or 0)), x.get("name", "").lower()))
-    return favorites[:MAX_FAVORITES]
+APP_EXPORT_VERSION = 2
 
 
 def _normalize_history_shape(data):
     if not isinstance(data, dict):
         data = {}
-    data.setdefault("searches", [])
-    data.setdefault("favorites", [])
-    data.setdefault("saved_searches", [])
-    data.setdefault("action_history", [])
-    favorites = []
-    seen = set()
-    for item in data.get("favorites", []):
-        norm = normalize_favorite_entry(item)
-        if not norm:
-            continue
-        key = norm.get("favorite_id") or favorite_dedupe_key(norm)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        favorites.append(norm)
-        if len(favorites) >= MAX_FAVORITES:
-            break
-    data["favorites"] = favorites
-    return data
+    events = [e for e in data.get("action_history", []) if isinstance(e, dict)]
+    return {"action_history": events}
 
 
 def _load_history():
@@ -1702,7 +1420,7 @@ def _load_history():
         with open(HISTORY_FILE, "r") as f:
             return _normalize_history_shape(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"searches": [], "favorites": [], "saved_searches": [], "action_history": []}
+        return {"action_history": []}
 
 
 def _save_history(data):
@@ -1734,12 +1452,7 @@ def _merge_unique(items, key_fn, limit=None):
 
 
 def build_export_bundle(include_action_history=False, include_stats=False):
-    history = _load_history()
-    bundle_history = {
-        "searches": list(history.get("searches", []))[:MAX_SEARCH_HISTORY],
-        "favorites": list(history.get("favorites", []))[:MAX_FAVORITES],
-        "saved_searches": list(history.get("saved_searches", []))[:MAX_SAVED_SEARCHES],
-    }
+    bundle_history = {}
     if include_action_history:
         bundle_history["action_history"] = get_action_history(get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"]))
     bundle = {
@@ -1749,9 +1462,6 @@ def build_export_bundle(include_action_history=False, include_stats=False):
         "settings": load_settings(),
         "history": bundle_history,
         "meta": {
-            "favorites": len(bundle_history.get("favorites", [])),
-            "saved_searches": len(bundle_history.get("saved_searches", [])),
-            "search_history": len(bundle_history.get("searches", [])),
             "action_history": len(bundle_history.get("action_history", [])),
         },
     }
@@ -1780,9 +1490,6 @@ def import_dashboard_bundle(bundle, mode="merge"):
     if mode == "replace":
         final_settings = incoming_settings
         final_history = {
-            "searches": list(incoming_history.get("searches", []))[:MAX_SEARCH_HISTORY],
-            "favorites": list(incoming_history.get("favorites", []))[:MAX_FAVORITES],
-            "saved_searches": list(incoming_history.get("saved_searches", []))[:MAX_SAVED_SEARCHES],
             "action_history": list(incoming_history.get("action_history", []))[: get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"])],
         }
     else:
@@ -1798,15 +1505,6 @@ def import_dashboard_bundle(bundle, mode="merge"):
         final_settings["dashboard"] = normalize_dashboard_config({**final_settings.get("dashboard", {}), **incoming_settings.get("dashboard", {})})
 
         final_history = {
-            "searches": _merge_unique(list(incoming_history.get("searches", [])) + list(current_history.get("searches", [])),
-                                      lambda item: f"{str(item.get('type') or '').lower()}::{str(item.get('query') or '').strip().lower()}",
-                                      MAX_SEARCH_HISTORY),
-            "favorites": _merge_unique(list(incoming_history.get("favorites", [])) + list(current_history.get("favorites", [])),
-                                       lambda item: str(item.get("link") or "").strip().lower(),
-                                       MAX_FAVORITES),
-            "saved_searches": _merge_unique(list(incoming_history.get("saved_searches", [])) + list(current_history.get("saved_searches", [])),
-                                            lambda item: str(item.get("key") or item.get("id") or "").strip().lower(),
-                                            MAX_SAVED_SEARCHES),
             "action_history": _merge_unique(list(incoming_history.get("action_history", [])) + list(current_history.get("action_history", [])),
                                             lambda item: f"{item.get('ts') or 0}:{item.get('action') or ''}:{item.get('target') or ''}:{item.get('code') or ''}",
                                             get_dashboard_config().get("action_history_limit", DEFAULT_DASHBOARD_CONFIG["action_history_limit"])),
@@ -1829,9 +1527,6 @@ def import_dashboard_bundle(bundle, mode="merge"):
             "refresh_interval_sec": final_settings.get("dashboard", {}).get("refresh_interval_sec"),
         },
         "history": {
-            "searches": len(final_history.get("searches", [])),
-            "favorites": len(final_history.get("favorites", [])),
-            "saved_searches": len(final_history.get("saved_searches", [])),
             "action_history": len(final_history.get("action_history", [])),
         },
     }
@@ -1849,197 +1544,6 @@ def init_action_history_store():
 init_action_history_store()
 
 
-def add_search_history(query, search_type, result_count):
-    h = _load_history()
-    entry = {"query": query, "type": search_type, "results": result_count,
-             "timestamp": int(time.time()), "date": time.strftime("%Y-%m-%d %H:%M")}
-    # Remove duplicate queries
-    h["searches"] = [s for s in h.get("searches", []) if s.get("query") != query]
-    h["searches"].insert(0, entry)
-    h["searches"] = h["searches"][:MAX_SEARCH_HISTORY]
-    _save_history(h)
-
-def add_favorite(name, ed2k_link, size="", sources=0, *, kind=None, query="", search_type="kad"):
-    h = _load_history()
-    if "favorites" not in h:
-        h["favorites"] = []
-    entry = normalize_favorite_entry({
-        "name": name,
-        "link": ed2k_link,
-        "size": size,
-        "sources": sources,
-        "added": time.strftime("%Y-%m-%d %H:%M"),
-        "created_ts": int(time.time()),
-        "kind": kind,
-        "query": query,
-        "search_type": search_type,
-    })
-    if not entry:
-        return False
-    dedupe = favorite_dedupe_key(entry)
-    if any(favorite_dedupe_key(f) == dedupe for f in h["favorites"]):
-        return False
-    h["favorites"] = [f for f in h.get("favorites", []) if favorite_dedupe_key(f) != dedupe]
-    h["favorites"].insert(0, entry)
-    h["favorites"] = h["favorites"][:MAX_FAVORITES]
-    _save_history(h)
-    return True
-
-
-def remove_favorite(ref):
-    ref = str(ref or "").strip()
-    removed, _ = remove_favorites([ref])
-    return removed
-
-
-def remove_favorites(refs):
-    refs = [str(ref or "").strip() for ref in (refs or []) if str(ref or "").strip()]
-    if not refs:
-        return 0, []
-    wanted = set(refs)
-    h = _load_history()
-    kept = []
-    removed_ids = []
-    for item in h.get("favorites", []):
-        norm = normalize_favorite_entry(item)
-        favorite_id = str((norm or item).get("favorite_id") or "").strip()
-        link = str((norm or item).get("link") or "").strip()
-        if favorite_id in wanted or link in wanted:
-            removed_ids.append(favorite_id or link)
-            continue
-        kept.append(item)
-    h["favorites"] = kept
-    _save_history(h)
-    return len(removed_ids), removed_ids
-
-
-def get_saved_searches():
-    h = _load_history()
-    saved = h.get("saved_searches", [])
-    saved.sort(key=lambda item: (-(item.get("last_run_ts") or 0), -(item.get("created_ts") or 0)))
-    return saved
-
-
-def add_saved_search(query, search_type="kad", label=""):
-    query = str(query or "").strip()
-    search_type = str(search_type or "kad").strip().lower()
-    label = str(label or "").strip()
-    if not query:
-        return False, "Query vide"
-    if search_type not in ("kad", "global", "local"):
-        search_type = "kad"
-    h = _load_history()
-    saved = h.get("saved_searches", [])
-    normalized_key = f"{search_type}::{query.lower()}"
-    for item in saved:
-        if item.get("key") == normalized_key:
-            if label and item.get("label") != label:
-                item["label"] = label
-                _save_history(h)
-            return False, "Déjà enregistrée"
-    now_ts = int(time.time())
-    saved.insert(0, {
-        "id": hashlib.sha1(f"{normalized_key}|{now_ts}".encode()).hexdigest()[:12],
-        "key": normalized_key,
-        "query": query,
-        "type": search_type,
-        "label": label or query,
-        "created": time.strftime("%Y-%m-%d %H:%M"),
-        "created_ts": now_ts,
-        "last_run": "",
-        "last_run_ts": 0,
-        "run_count": 0,
-    })
-    h["saved_searches"] = saved[:MAX_SAVED_SEARCHES]
-    _save_history(h)
-    return True, "Recherche enregistrée"
-
-
-def remove_saved_search(search_id):
-    removed, _ = remove_saved_searches([search_id])
-    return removed
-
-
-def remove_saved_searches(search_ids):
-    ids = [str(x or "").strip() for x in (search_ids or []) if str(x or "").strip()]
-    if not ids:
-        return 0, []
-    wanted = set(ids)
-    h = _load_history()
-    kept = []
-    removed_ids = []
-    for item in h.get("saved_searches", []):
-        item_id = str(item.get("id") or "").strip()
-        if item_id in wanted:
-            removed_ids.append(item_id)
-            continue
-        kept.append(item)
-    h["saved_searches"] = kept
-    _save_history(h)
-    return len(removed_ids), removed_ids
-
-
-def update_saved_search(search_id, *, query=None, search_type=None, label=None):
-    search_id = str(search_id or "").strip()
-    if not search_id:
-        return False, "id requis", None
-    h = _load_history()
-    saved = h.get("saved_searches", [])
-    target = None
-    for item in saved:
-        if str(item.get("id") or "").strip() == search_id:
-            target = item
-            break
-    if not target:
-        return False, "Recherche sauvegardée introuvable", None
-
-    next_query = str(target.get("query") or "").strip() if query is None else str(query or "").strip()
-    next_type = str(target.get("type") or "kad").strip().lower() if search_type is None else str(search_type or "kad").strip().lower()
-    next_label = str(target.get("label") or next_query).strip() if label is None else str(label or "").strip()
-
-    if not next_query:
-        return False, "Query vide", None
-    if next_type not in ("kad", "global", "local"):
-        next_type = "kad"
-    normalized_key = f"{next_type}::{next_query.lower()}"
-    for item in saved:
-        if item is target:
-            continue
-        if item.get("key") == normalized_key:
-            return False, "Une recherche sauvegardée identique existe déjà", None
-
-    target["query"] = next_query
-    target["type"] = next_type
-    target["key"] = normalized_key
-    target["label"] = next_label or next_query
-    target["updated"] = time.strftime("%Y-%m-%d %H:%M")
-    target["updated_ts"] = int(time.time())
-    _save_history(h)
-    return True, "Recherche mise à jour", target
-
-
-def touch_saved_search(query, search_type="kad"):
-    query = str(query or "").strip()
-    search_type = str(search_type or "kad").strip().lower()
-    if not query:
-        return
-    key = f"{search_type}::{query.lower()}"
-    h = _load_history()
-    changed = False
-    for item in h.get("saved_searches", []):
-        if item.get("key") == key:
-            item["last_run"] = time.strftime("%Y-%m-%d %H:%M")
-            item["last_run_ts"] = int(time.time())
-            item["run_count"] = int(item.get("run_count") or 0) + 1
-            changed = True
-            break
-    if changed:
-        _save_history(h)
-
-
-# ══════════════════════════════════════════
-# Stats History (daily DL/UL tracking)
-# ══════════════════════════════════════════
 STATS_FILE = os.path.join(AMULE_HOME, "dashboard-stats.json")
 
 def _load_stats():
@@ -2109,8 +1613,6 @@ def normalize_action_error(action, code, detail=""):
         "INVALID_INPUT": "Entrée invalide.",
         "CORE_UNREACHABLE": "Impossible de joindre le core aMule.",
         "SESSION_ERROR": "La session aMule a échoué.",
-        "SEARCH_EXPIRED": "La recherche a expiré ou n'est plus disponible.",
-        "RESULT_NOT_FOUND": "Résultat de recherche introuvable.",
         "TRANSFER_NOT_FOUND": "Transfert introuvable.",
         "ALREADY_EXISTS": "Ce fichier est déjà présent dans les transferts.",
         "COMMAND_FAILED": "La commande aMule a échoué.",
@@ -2266,184 +1768,6 @@ def run_amulecmd_interactive(commands, timeout=25):
     return "ERROR: no password configured"
 
 
-def download_from_cached_search(result_id):
-    ctx = _last_search_context.copy()
-    if not ctx.get("query"):
-        return action_response("download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
-    if ctx.get("timestamp") and time.time() - ctx.get("timestamp", 0) > 15 * 60:
-        return action_response("download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
-    matched = next((r for r in ctx.get("results", []) if int(r.get("id", -1)) == int(result_id)), None)
-    if not matched:
-        return action_response("download", False, "RESULT_NOT_FOUND", normalize_action_error("download", "RESULT_NOT_FOUND"), status=404)
-    current_downloads = parse_downloads(run_amulecmd("show dl"))
-    existing = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=current_downloads)
-    if existing:
-        return action_response("download", False, "ALREADY_EXISTS", normalize_action_error("download", "ALREADY_EXISTS"), confirmed=True, data={"existing": existing}, status=409)
-    interactive_output = run_amulecmd_interactive([f"search {ctx.get('type', 'kad')} {ctx.get('query', '')}", ("sleep", 3.5), "results", ("sleep", 0.3), f"download {int(result_id)}"], timeout=30)
-    err = classify_amule_error(interactive_output)
-    if err:
-        return action_response("download", False, err, normalize_action_error("download", err, interactive_output), status=502)
-    time.sleep(0.6)
-    refreshed = parse_downloads(run_amulecmd("show dl"))
-    created = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=refreshed)
-    if created:
-        cache_clear("downloads")
-        return action_response("download", True, "SUCCESS", "Téléchargement confirmé dans les transferts.", confirmed=True, data={"download": created})
-    return action_response("download", False, "STATE_NOT_CONFIRMED", normalize_action_error("download", "STATE_NOT_CONFIRMED"), status=502, data={"output": interactive_output})
-
-
-def bulk_download_from_cached_search(result_ids):
-    ctx = _last_search_context.copy()
-    if not ctx.get("query"):
-        return action_response("bulk_download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
-    if ctx.get("timestamp") and time.time() - ctx.get("timestamp", 0) > 15 * 60:
-        return action_response("bulk_download", False, "SEARCH_EXPIRED", normalize_action_error("download", "SEARCH_EXPIRED"), status=409)
-    if not isinstance(result_ids, list):
-        return action_response("bulk_download", False, "INVALID_INPUT", "Aucun identifiant de résultat valide fourni.", status=400)
-
-    normalized_ids = []
-    seen_ids = set()
-    for raw_id in result_ids:
-        try:
-            value = int(raw_id)
-        except Exception:
-            continue
-        if value <= 0 or value in seen_ids:
-            continue
-        seen_ids.add(value)
-        normalized_ids.append(value)
-    if not normalized_ids:
-        return action_response("bulk_download", False, "INVALID_INPUT", "Aucun identifiant de résultat valide fourni.", status=400)
-
-    result_map = {}
-    for row in ctx.get("results", []) or []:
-        try:
-            row_id = int(row.get("id", -1))
-        except Exception:
-            continue
-        result_map.setdefault(row_id, row)
-
-    current_downloads = parse_downloads(run_amulecmd("show dl"))
-    results = []
-    attempt_ids = []
-    attempt_rows = []
-    for rid in normalized_ids:
-        matched = result_map.get(rid)
-        if not matched:
-            results.append({
-                "id": rid,
-                "name": "",
-                "size": "",
-                "sources": 0,
-                "code": "RESULT_NOT_FOUND",
-                "message": normalize_action_error("download", "RESULT_NOT_FOUND"),
-                "confirmed": False,
-                "ok": False,
-            })
-            continue
-        size_bytes = size_to_bytes(matched.get("size", ""))
-        existing = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_bytes, downloads=current_downloads)
-        if existing:
-            results.append({
-                "id": rid,
-                "name": matched.get("name", ""),
-                "size": matched.get("size", ""),
-                "sources": int(matched.get("sources", 0) or 0),
-                "hash": existing.get("hash", ""),
-                "code": "ALREADY_EXISTS",
-                "message": normalize_action_error("download", "ALREADY_EXISTS"),
-                "confirmed": True,
-                "ok": True,
-            })
-            continue
-        attempt_ids.append(rid)
-        attempt_rows.append(matched)
-
-    interactive_output = ""
-    err = None
-    if attempt_ids:
-        commands = [f"search {ctx.get('type', 'kad')} {ctx.get('query', '')}", ("sleep", 3.5), "results", ("sleep", 0.3)]
-        commands.extend([f"download {rid}" for rid in attempt_ids])
-        interactive_output = run_amulecmd_interactive(commands, timeout=max(30, 20 + len(attempt_ids) * 2))
-        err = classify_amule_error(interactive_output)
-        time.sleep(0.7)
-
-    refreshed = parse_downloads(run_amulecmd("show dl"))
-    for matched, rid in zip(attempt_rows, attempt_ids):
-        created = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=refreshed)
-        if created:
-            results.append({
-                "id": rid,
-                "name": matched.get("name", ""),
-                "size": matched.get("size", ""),
-                "sources": int(matched.get("sources", 0) or 0),
-                "hash": created.get("hash", ""),
-                "code": "SUCCESS",
-                "message": "Téléchargement confirmé dans les transferts.",
-                "confirmed": True,
-                "ok": True,
-            })
-        else:
-            failure_code = err or "STATE_NOT_CONFIRMED"
-            results.append({
-                "id": rid,
-                "name": matched.get("name", ""),
-                "size": matched.get("size", ""),
-                "sources": int(matched.get("sources", 0) or 0),
-                "code": failure_code,
-                "message": normalize_action_error("download", failure_code, interactive_output),
-                "confirmed": False,
-                "ok": False,
-            })
-
-    ordered = []
-    by_id = {}
-    for item in results:
-        by_id.setdefault(item.get("id"), []).append(item)
-    for rid in normalized_ids:
-        ordered.extend(by_id.get(rid, []))
-
-    overview = summarize_search_download_results(ordered)
-    success = overview["success"]
-    already = overview["already"]
-    missing = overview["missing"]
-    failed = overview["failed"]
-    if success == len(normalized_ids) and success > 0:
-        code = "SUCCESS"
-        ok = True
-        status = 200
-    elif success > 0 or already > 0:
-        code = "PARTIAL_SUCCESS"
-        ok = True
-        status = 207
-    elif err:
-        code = err
-        ok = False
-        status = 502
-    else:
-        primary_codes = sorted(overview["counts_by_code"].items(), key=lambda kv: kv[1], reverse=True)
-        code = primary_codes[0][0] if primary_codes else "STATE_NOT_CONFIRMED"
-        ok = False
-        status = 409 if code in ("ALREADY_EXISTS", "RESULT_NOT_FOUND") else 502
-    message = f"Téléchargements lot: {success} confirmé(s), {already} déjà présent(s), {missing} introuvable(s), {failed} échec(s)."
-    if success:
-        cache_clear("downloads")
-    return action_response("bulk_download", ok, code, message, confirmed=(success + already == len(normalized_ids) and missing == 0 and failed == 0), status=status, data={
-        "summary": {
-            "total": len(normalized_ids),
-            "success": success,
-            "already": already,
-            "failed": failed,
-            "missing": missing,
-        },
-        "overview": overview,
-        "results": ordered[:300],
-        "requested_ids": normalized_ids,
-        "changed_result_ids": overview["confirmed_ids"],
-        "output": interactive_output if err else "",
-    })
-
-
 def add_ed2k_confirmed(link):
     link = (link or "").strip()
     if not link.startswith("ed2k://"):
@@ -2547,313 +1871,6 @@ def add_multiple_ed2k_confirmed(raw_text):
         'already_exists': already,
         'failed': failed,
         'results': results[:50],
-    })
-
-
-def normalize_match_text(value):
-    value = unquote(str(value or "")).strip().lower()
-    return re.sub(r'[^a-z0-9]+', ' ', value).strip()
-
-
-def match_favorite_to_search_result(favorite, results):
-    results = results or []
-    target_name = str(favorite.get("name") or "").strip()
-    if not target_name:
-        return None
-    target_norm = normalize_match_text(target_name)
-    target_bytes = favorite.get("size_bytes") or size_to_bytes(favorite.get("size", ""))
-    scored = []
-    for row in results:
-        row_name = str(row.get("name") or "").strip()
-        row_norm = normalize_match_text(row_name)
-        if not row_norm:
-            continue
-        exact_name = row_name == target_name
-        norm_name = row_norm == target_norm
-        if not exact_name and not norm_name:
-            continue
-        row_bytes = size_to_bytes(row.get("size", ""))
-        size_match = False
-        if target_bytes and row_bytes:
-            tolerance = max(int(target_bytes * 0.02), 2 * 1024 * 1024)
-            size_match = abs(row_bytes - target_bytes) <= tolerance
-        score = 0
-        if exact_name:
-            score += 200
-        if norm_name:
-            score += 120
-        if size_match:
-            score += 80
-        score += min(int(row.get("sources", 0) or 0), 50)
-        scored.append((score, row))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best = scored[0]
-    if best_score < 120:
-        return None
-    return best
-
-
-def fetch_search_results_for_query(query, search_type):
-    query = str(query or "").strip()
-    search_type = str(search_type or "kad").strip().lower() or "kad"
-    output = run_amulecmd_interactive([f"search {search_type} {query}", ("sleep", 3.5), "results"], timeout=30)
-    err = classify_amule_error(output)
-    results = [] if err else parse_search_results(output)
-    return results, output, err
-
-
-def summarize_favorite_download_results(results):
-    results = [dict(item) for item in (results or []) if isinstance(item, dict)]
-    summary = {
-        "total": len(results),
-        "success": 0,
-        "already": 0,
-        "failed": 0,
-        "missing": 0,
-        "counts_by_code": {},
-        "confirmed_favorite_ids": [],
-        "failed_favorite_ids": [],
-        "missing_favorite_ids": [],
-        "success_items": [],
-        "already_items": [],
-        "failed_items": [],
-    }
-    for item in results:
-        code = str(item.get("code") or "UNKNOWN")
-        fid = str(item.get("favorite_id") or "")
-        summary["counts_by_code"][code] = summary["counts_by_code"].get(code, 0) + 1
-        compact = {
-            "favorite_id": fid,
-            "name": item.get("name", ""),
-            "kind": item.get("kind", ""),
-            "code": code,
-            "message": item.get("message", ""),
-        }
-        if code == "SUCCESS":
-            summary["success"] += 1
-            if fid:
-                summary["confirmed_favorite_ids"].append(fid)
-            summary["success_items"].append(compact)
-        elif code == "ALREADY_EXISTS":
-            summary["already"] += 1
-            if fid:
-                summary["confirmed_favorite_ids"].append(fid)
-            summary["already_items"].append(compact)
-        elif code == "RESULT_NOT_FOUND":
-            summary["missing"] += 1
-            if fid:
-                summary["missing_favorite_ids"].append(fid)
-            summary["failed_items"].append(compact)
-        else:
-            summary["failed"] += 1
-            if fid:
-                summary["failed_favorite_ids"].append(fid)
-            summary["failed_items"].append(compact)
-    return summary
-
-
-def _favorite_result_from_payload(favorite, payload):
-    data = payload.get("data") or {}
-    dl = data.get("download") or data.get("existing") or {}
-    return {
-        "favorite_id": favorite.get("favorite_id", ""),
-        "kind": favorite.get("kind", ""),
-        "name": favorite.get("name") or dl.get("name", ""),
-        "code": payload.get("code"),
-        "message": payload.get("message", ""),
-        "confirmed": bool(payload.get("confirmed")),
-        "ok": bool(payload.get("ok")),
-        "hash": dl.get("hash", ""),
-        "query": favorite.get("query", ""),
-        "search_type": favorite.get("search_type", ""),
-    }
-
-
-def download_favorites(entries):
-    favorites = []
-    seen = set()
-    for raw in entries or []:
-        fav = normalize_favorite_entry(raw)
-        if not fav:
-            continue
-        fid = fav.get("favorite_id") or favorite_dedupe_key(fav)
-        if fid in seen:
-            continue
-        seen.add(fid)
-        favorites.append(fav)
-    if not favorites:
-        return action_response("favorite_download", False, "INVALID_INPUT", "Aucun favori valide fourni.", status=400)
-
-    results = []
-    current_downloads = parse_downloads(run_amulecmd("show dl"))
-
-    direct_favorites = [f for f in favorites if f.get("kind") != "search_result"]
-    search_favorites = [f for f in favorites if f.get("kind") == "search_result"]
-
-    for fav in direct_favorites:
-        payload, _status = add_ed2k_confirmed(fav.get("link", ""))
-        results.append(_favorite_result_from_payload(fav, payload))
-    if direct_favorites:
-        current_downloads = parse_downloads(run_amulecmd("show dl"))
-
-    grouped = {}
-    for fav in search_favorites:
-        key = (fav.get("search_type") or "kad", fav.get("query") or "")
-        grouped.setdefault(key, []).append(fav)
-
-    for (search_type, query), group in grouped.items():
-        if not query.strip():
-            for fav in group:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": fav.get("name", ""),
-                    "code": "INVALID_INPUT",
-                    "message": "Ce favori de recherche n'a pas de requête associée.",
-                    "confirmed": False,
-                    "ok": False,
-                    "query": query,
-                    "search_type": search_type,
-                })
-            continue
-
-        search_results, search_output, search_err = fetch_search_results_for_query(query, search_type)
-        if search_err:
-            for fav in group:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": fav.get("name", ""),
-                    "code": search_err,
-                    "message": normalize_action_error("download", search_err, search_output),
-                    "confirmed": False,
-                    "ok": False,
-                    "query": query,
-                    "search_type": search_type,
-                })
-            continue
-
-        attempts = []
-        used_result_ids = set()
-        for fav in group:
-            matched = match_favorite_to_search_result(fav, search_results)
-            if not matched:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": fav.get("name", ""),
-                    "code": "RESULT_NOT_FOUND",
-                    "message": normalize_action_error("download", "RESULT_NOT_FOUND"),
-                    "confirmed": False,
-                    "ok": False,
-                    "query": query,
-                    "search_type": search_type,
-                })
-                continue
-            existing = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=current_downloads)
-            if existing:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": matched.get("name", fav.get("name", "")),
-                    "code": "ALREADY_EXISTS",
-                    "message": normalize_action_error("download", "ALREADY_EXISTS"),
-                    "confirmed": True,
-                    "ok": True,
-                    "hash": existing.get("hash", ""),
-                    "query": query,
-                    "search_type": search_type,
-                })
-                continue
-            result_id = int(matched.get("id", 0) or 0)
-            if result_id in used_result_ids:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": matched.get("name", fav.get("name", "")),
-                    "code": "ALREADY_EXISTS",
-                    "message": "Ce résultat est déjà ciblé par un autre favori sélectionné.",
-                    "confirmed": True,
-                    "ok": True,
-                    "query": query,
-                    "search_type": search_type,
-                })
-                continue
-            used_result_ids.add(result_id)
-            attempts.append((fav, matched))
-
-        interactive_output = ""
-        err = None
-        if attempts:
-            commands = [f"search {search_type} {query}", ("sleep", 3.5), "results", ("sleep", 0.3)]
-            commands.extend([f"download {int(match.get('id'))}" for _, match in attempts])
-            interactive_output = run_amulecmd_interactive(commands, timeout=max(30, 20 + len(attempts) * 2))
-            err = classify_amule_error(interactive_output)
-            time.sleep(0.7)
-            current_downloads = parse_downloads(run_amulecmd("show dl"))
-
-        for fav, matched in attempts:
-            created = check_duplicate_downloads(name=matched.get("name"), size_bytes=size_to_bytes(matched.get("size", "")), downloads=current_downloads)
-            if created:
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": matched.get("name", fav.get("name", "")),
-                    "code": "SUCCESS",
-                    "message": "Favori confirmé dans les transferts.",
-                    "confirmed": True,
-                    "ok": True,
-                    "hash": created.get("hash", ""),
-                    "query": query,
-                    "search_type": search_type,
-                })
-            else:
-                failure_code = err or "STATE_NOT_CONFIRMED"
-                results.append({
-                    "favorite_id": fav.get("favorite_id", ""),
-                    "kind": fav.get("kind", ""),
-                    "name": matched.get("name", fav.get("name", "")),
-                    "code": failure_code,
-                    "message": normalize_action_error("download", failure_code, interactive_output),
-                    "confirmed": False,
-                    "ok": False,
-                    "query": query,
-                    "search_type": search_type,
-                })
-
-    order = {fav.get("favorite_id"): idx for idx, fav in enumerate(favorites)}
-    results.sort(key=lambda item: order.get(item.get("favorite_id"), 999999))
-    summary = summarize_favorite_download_results(results)
-    success = summary["success"]
-    already = summary["already"]
-    missing = summary["missing"]
-    failed = summary["failed"]
-    total = len(favorites)
-    if failed == 0 and missing == 0 and success == total:
-        code = "SUCCESS"
-        ok = True
-        status = 200
-    elif failed == 0 and missing == 0 and success + already == total:
-        code = "SUCCESS" if success else "ALREADY_EXISTS"
-        ok = True
-        status = 200
-    elif success > 0 or already > 0:
-        code = "PARTIAL_SUCCESS"
-        ok = True
-        status = 207
-    else:
-        code = "RESULT_NOT_FOUND" if missing == total else "COMMAND_FAILED"
-        ok = False
-        status = 404 if missing == total else 502
-    if success:
-        cache_clear("downloads")
-    message = f"Favoris: {success} ajouté(s), {already} déjà présent(s), {missing} introuvable(s), {failed} échec(s)."
-    return action_response("favorite_download", ok, code, message, confirmed=(success + already == total and failed == 0 and missing == 0), status=status, data={
-        "summary": summary,
-        "results": results[:300],
-        "changed_favorite_ids": summary["confirmed_favorite_ids"],
     })
 
 
@@ -3187,13 +2204,6 @@ def build_debug_snapshot():
     diag["download_status_counts"] = counts
 
     diag["action_locks"] = {name: lock.locked() for name, lock in _action_locks.items()}
-    search_age = int(time.time() - (_last_search_context.get("timestamp") or 0)) if _last_search_context.get("timestamp") else None
-    diag["last_search"] = {
-        "query": _last_search_context.get("query", ""),
-        "type": _last_search_context.get("type", ""),
-        "results_count": len(_last_search_context.get("results") or []),
-        "age_seconds": search_age,
-    }
     diag["recent_actions"] = get_action_history(12)
     diag["dashboard_config"] = get_dashboard_config()
     if get_dashboard_config().get("debug_mode", True):
@@ -3207,7 +2217,6 @@ def build_debug_snapshot():
         "downloads_count": diag.get("downloads_count"),
         "download_status_counts": diag.get("download_status_counts"),
         "action_locks": diag.get("action_locks"),
-        "last_search": diag.get("last_search"),
         "recent_actions": diag.get("recent_actions"),
         "dashboard_config": diag.get("dashboard_config"),
     })
@@ -3372,48 +2381,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "download": detail})
 
-        elif path == "/api/search":
-            query = qs.get("q", [""])[0]
-            stype = qs.get("type", ["kad"])[0]
-            if not query: self.send_json({"error": "q requis"}, 400); return
-            if stype not in ("kad", "global", "local"): stype = "kad"
-            run_amulecmd(f"search {stype} {query}")
-            time.sleep(3)
-            raw = run_amulecmd("results")
-            results = parse_search_results(raw)
-            # Record search history
-            try:
-                add_search_history(query, stype, len(results))
-                touch_saved_search(query, stype)
-            except Exception:
-                pass
-            set_last_search_context(query, stype, results)
-            record_action_event({
-                "action": "search",
-                "ok": True,
-                "confirmed": True,
-                "code": "SUCCESS",
-                "message": f"Recherche terminée: {len(results)} résultat(s).",
-                "data": {"query": query},
-            }, 200)
-            self.send_json({"query": query, "type": stype, "results": results, "raw": raw})
-
-        elif path == "/api/results":
-            raw = run_amulecmd("results")
-            self.send_json({"results": parse_search_results(raw)})
-
-        elif path == "/api/download":
-            blocked = guard_write_action(self, "download")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            num = qs.get("id", [""])[0]
-            if not num.isdigit():
-                payload, status = action_response("download", False, "INVALID_INPUT", normalize_action_error("download", "INVALID_INPUT"), status=400)
-            else:
-                payload, status = execute_locked_action("download", lambda: download_from_cached_search(int(num)))
-            self.send_json(payload, status)
-
         elif path == "/api/add_ed2k":
             blocked = guard_write_action(self, "add_ed2k")
             if blocked:
@@ -3572,8 +2539,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/kad/status":
             raw = run_amulecmd("status")
-            kad_ok = bool(re.search(r'kad.*(running|connected|firewalled)', raw, re.I))
-            ed2k_ok = bool(re.search(r'ed2k.*connected', raw, re.I)) and not bool(re.search(r'ed2k.*not connected', raw, re.I))
+            # amulecmd prints "Kad: Connected (ok|firewalled)" / "Kad: Not connected" / "Kad: Not running"
+            kad_ok = bool(re.search(r'kad:\s*connected', raw, re.I))
+            ed2k_ok = bool(re.search(r'ed2k:\s*connected to', raw, re.I))
             self.send_json({"kad_connected": kad_ok, "ed2k_connected": ed2k_ok, "raw": raw})
 
         elif path == "/api/kad/reconnect":
@@ -3644,7 +2612,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             lines_limit = qs.get("lines", ["120"])[0]
             valid_logs = {"kad-monitor": "/var/log/kad-monitor.log", "source-scanner": "/var/log/source-scanner.log",
                           "server-update": "/var/log/server-update.log", "backup": "/var/log/backup.log", "source-boost": "/var/log/amule-diag/source-boost.log", "stall-detector": "/var/log/amule-diag/stall-detector.log",
-                          "source-hunter": "/var/log/amule-diag/source-hunter.log",
                           "connectivity": "/var/log/amule-diag/connectivity.log",
                           "port-forward": "/var/log/amule-diag/port-forward.log",
                           "completions": "/var/log/amule-diag/completions.log",
@@ -3710,16 +2677,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result["file_events_tail"] = []
             self.send_json(result)
 
-        elif path == "/api/search_history":
-            h = _load_history()
-            self.send_json({"searches": h.get("searches", [])})
-
-        elif path == "/api/saved_searches":
-            self.send_json({"saved_searches": get_saved_searches()})
-
-        elif path == "/api/favorites":
-            self.send_json({"favorites": get_favorites()})
-
         elif path == "/api/stats_history":
             stats = _load_stats()
             self.send_json({"daily": stats.get("daily", {})})
@@ -3764,16 +2721,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/action_history/clear":
             clear_action_history_store()
             self.send_json({"ok": True, "message": "Historique des actions vidé."})
-            return
-
-        if parsed.path == "/api/search_results/bulk_download":
-            blocked = guard_write_action(self, "download")
-            if blocked:
-                self.send_json(*blocked)
-                return
-            ids = data.get("ids") if isinstance(data.get("ids"), list) else []
-            payload, status = execute_locked_action("download", lambda: bulk_download_from_cached_search(ids))
-            self.send_json(payload, status)
             return
 
         if parsed.path == "/api/transfers/bulk_action":
@@ -3913,94 +2860,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
             else:
                 self.send_json({"error": "Source non trouvée"}, 404)
-
-        elif parsed.path == "/api/saved_searches/add":
-            query = str(data.get("query") or "").strip()
-            search_type = str(data.get("type") or "kad").strip().lower()
-            label = str(data.get("label") or "").strip()
-            ok, message = add_saved_search(query, search_type, label)
-            if ok:
-                self.send_json({"ok": True, "message": message})
-            else:
-                self.send_json({"ok": False, "error": message}, 409 if query else 400)
-
-        elif parsed.path == "/api/saved_searches/update":
-            search_id = str(data.get("id") or "").strip()
-            ok, message, item = update_saved_search(
-                search_id,
-                query=data.get("query") if "query" in data else None,
-                search_type=data.get("type") if "type" in data else None,
-                label=data.get("label") if "label" in data else None,
-            )
-            if ok:
-                self.send_json({"ok": True, "message": message, "item": item})
-            else:
-                status = 404 if search_id and item is None and message == "Recherche sauvegardée introuvable" else 409 if search_id else 400
-                self.send_json({"ok": False, "error": message}, status)
-
-        elif parsed.path == "/api/saved_searches/remove":
-            ids = data.get("ids")
-            search_id = str(data.get("id") or "").strip()
-            if isinstance(ids, list):
-                removed, removed_ids = remove_saved_searches(ids)
-                self.send_json({"ok": bool(removed), "removed": removed, "removed_ids": removed_ids}, 200 if removed else 404)
-                return
-            if not search_id:
-                self.send_json({"ok": False, "error": "id requis"}, 400)
-                return
-            removed = remove_saved_search(search_id)
-            self.send_json({"ok": bool(removed), "removed": removed, "removed_ids": [search_id] if removed else []}, 200 if removed else 404)
-
-        elif parsed.path == "/api/favorites/add":
-            name = data.get("name", "")
-            link = data.get("link", "")
-            kind = str(data.get("kind") or "").strip().lower()
-            query = str(data.get("query") or "").strip()
-            search_type = str(data.get("search_type") or data.get("type") or "kad").strip().lower() or "kad"
-            if not link.startswith("ed2k://") and not query:
-                self.send_json({"error": "Favori invalide"}, 400)
-                return
-            added = add_favorite(name, link, data.get("size", ""), data.get("sources", 0), kind=kind or None, query=query, search_type=search_type)
-            self.send_json({"ok": True, "added": added, "favorites": get_favorites()})
-
-        elif parsed.path == "/api/favorites/remove":
-            favorite_ids = data.get("favorite_ids")
-            if isinstance(favorite_ids, list):
-                removed, removed_ids = remove_favorites(favorite_ids)
-                self.send_json({"ok": True, "removed": removed, "removed_ids": removed_ids})
-                return
-            ref = data.get("favorite_id") or data.get("link") or ""
-            removed, removed_ids = remove_favorites([ref])
-            self.send_json({"ok": True, "removed": removed, "removed_ids": removed_ids})
-
-        elif parsed.path == "/api/favorites/download":
-            favorite_ids = data.get("favorite_ids")
-            favorite_id = data.get("favorite_id")
-            download_all = bool(data.get("download_all"))
-            if favorite_ids is not None or favorite_id is not None or download_all:
-                favorites = get_favorites()
-                selected = []
-                if download_all:
-                    selected = favorites
-                else:
-                    wanted = []
-                    if isinstance(favorite_ids, list):
-                        wanted.extend([str(x) for x in favorite_ids if str(x).strip()])
-                    if favorite_id is not None:
-                        wanted.append(str(favorite_id))
-                    wanted_set = set(wanted)
-                    selected = [fav for fav in favorites if fav.get("favorite_id") in wanted_set]
-                payload, status = execute_locked_action("favorite_download", lambda: download_favorites(selected))
-            else:
-                link_blob = str(data.get("link") or data.get("text") or "")
-                payload, status = execute_locked_action("add_ed2k", lambda: add_multiple_ed2k_confirmed(link_blob))
-            self.send_json(payload, status)
-
-        elif parsed.path == "/api/search_history/clear":
-            h = _load_history()
-            h["searches"] = []
-            _save_history(h)
-            self.send_json({"ok": True})
 
         else:
             self.send_json({"error": "not found"}, 404)

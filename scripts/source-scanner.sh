@@ -51,21 +51,16 @@ if [ -z "$SOURCES" ]; then
     exit 0
 fi
 
-TOTAL=0
-SUCCESS=0
-
 echo "$SOURCES" | while IFS='|' read -r kind url key; do
     [ -z "$url" ] && continue
-    TOTAL=$((TOTAL + 1))
     printf "%s [%s] %s — %s\n" "$LOG_PREFIX" "$kind" "$key" "$url"
 
     if [ "$kind" = "serverlist" ]; then
         # Import .met file via ed2k link
         LINK="ed2k://|serverlist|${url}|/"
         OUTPUT=$(amulecmd_run "add $LINK")
-        if echo "$OUTPUT" | grep -qvi "error"; then
+        if ! echo "$OUTPUT" | grep -qi "error"; then
             printf "%s   → Importé avec succès\n" "$LOG_PREFIX"
-            SUCCESS=$((SUCCESS + 1))
         else
             printf "%s   → Échec: %s\n" "$LOG_PREFIX" "$OUTPUT"
         fi
@@ -81,16 +76,13 @@ echo "$SOURCES" | while IFS='|' read -r kind url key; do
 
         # Extract IP:port from HTML
         SERVERS=$(echo "$HTML" | sed 's/<[^>]*>//g' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}[: ][0-9]{2,5}' | sed 's/ /:/g' | sort -u)
-        ADDED=0
         echo "$SERVERS" | while IFS=':' read -r ip port; do
-            [ -z "$ip" ] || [ -z "$port" ] && continue
+            { [ -z "$ip" ] || [ -z "$port" ]; } && continue
             LINK="ed2k://|server|${ip}|${port}|/"
             amulecmd_run "add $LINK" >/dev/null 2>&1
-            ADDED=$((ADDED + 1))
         done
         COUNT=$(echo "$SERVERS" | grep -c '.')
         printf "%s   → %s serveurs trouvés et importés\n" "$LOG_PREFIX" "$COUNT"
-        SUCCESS=$((SUCCESS + 1))
     fi
 done
 

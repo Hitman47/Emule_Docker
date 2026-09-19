@@ -1,14 +1,15 @@
 # aMule ZimaBoard Edition
 
-Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur de recherche ED2K intégré, gestion de serveurs multi-sources, tri automatique des fichiers, et intégration VPN Gluetun/NordVPN.
+Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, gestion de serveurs multi-sources, monitoring et intégration VPN Gluetun.
 
 ## Fonctionnalités
 
 ### Core
 - aMule daemon headless avec Web UI (AmuleWebUI-Reloaded)
-- Dashboard PWA moderne (port 8078) avec authentification
-- Moteur de recherche ED2K/Kad intégré + support liens `ed2k://`
+- Dashboard moderne (port 8078) avec authentification
+- Ajout de liens `ed2k://` (fichier ou liste de serveurs), un ou plusieurs à la fois, avec confirmation d'état
 - Onglet Serveurs avec import multi-sources
+- Recherche : utilise la Web UI aMule classique (port 4711) — l'onglet Recherche du dashboard a été retiré
 
 ### Gestion des serveurs ED2K (nouveau)
 - **3 sources pré-configurées** : eMule Security (officiel, prioritaire), Peerates, FlyerNet
@@ -25,13 +26,13 @@ Client aMule Docker pour ZimaBoard 832 / ZimaOS avec dashboard moderne, moteur d
 - Bouton de reconnexion manuelle dans les Paramètres
 
 ### Automatisation
-- Tri auto des fichiers par type (Video, Audio, Images, Documents, Archives, Software)
-- Auto-restart aMule (contourne les memory leaks)
+- Auto-restart aMule optionnel (cron)
 - Backup auto de la config avec rotation
 - Mise à jour auto de l'IP filter (emule-security.org)
+- Mise à jour auto de la liste de serveurs par amuled lui-même (`addresses.dat` généré depuis les sources activées)
 
 ### Sécurité
-- Obfuscation renforcée (chiffrement ED2K obligatoire)
+- Obfuscation supportée mais **non obligatoire** (le chiffrement obligatoire coupe la majorité des pairs)
 - IP Filter mis à jour automatiquement
 - Filtrage messages/spam activé
 - Dashboard protégé par mot de passe
@@ -87,13 +88,19 @@ ports:
 
 ```
 data/
-├── amule-config/                  # Config aMule
-│   └── dashboard-settings.json    # Paramètres du dashboard (sources serveurs, etc.)
-├── incoming/                      # Téléchargements terminés
-│   ├── Video/  Audio/  Images/  Documents/  Archives/  Software/  Other/
-├── temp/                          # Téléchargements en cours
-└── backups/                       # Sauvegardes config
+├── amule-config/                  # Config aMule (amule.conf, server.met, nodes.dat, addresses.dat…)
+│   ├── dashboard-settings.json    # Paramètres du dashboard (sources serveurs, etc.)
+│   └── dashboard-history.json     # Historique des actions du dashboard
+├── downloads/
+│   ├── incoming/                  # Téléchargements terminés
+│   └── temp/                      # Téléchargements en cours (même volume : pas de copie cross-device)
+├── backups/                       # Sauvegardes config
+└── logs/                          # Logs de diagnostic (/var/log/amule-diag)
 ```
+
+## Low ID / High ID
+
+Derrière un VPN **sans port forwarding** (NordVPN par exemple), aMule obtient un **Low ID** et Kad est « firewalled ». C'est normal et ça fonctionne, mais tu n'es joignable que par les clients High ID. Pour un High ID il faut un VPN avec port forwarding (ProtonVPN, AirVPN, PIA) : voir les exemples commentés dans `docker-compose.yml`.
 
 ## Variables d'environnement
 
@@ -104,14 +111,15 @@ data/
 | `DASHBOARD_PWD` | Mot de passe dashboard | = WEBUI_PWD |
 | `DASHBOARD_ENABLED` | Activer le dashboard | `true` |
 | `DASHBOARD_PORT` | Port du dashboard | `8078` |
-| `FILE_ORGANIZER_ENABLED` | Tri auto des fichiers | `true` |
 | `SERVER_UPDATE_ENABLED` | MAJ auto serveurs | `true` |
 | `BACKUP_ENABLED` | Backup auto config | `true` |
 | `MOD_AUTO_RESTART_ENABLED` | Auto-restart aMule | `true` |
 | `MOD_FIX_KAD_GRAPH_ENABLED` | Fix crash Kad graph | `true` |
 | `MOD_FIX_KAD_BOOTSTRAP_ENABLED` | Bootstrap Kad auto | `true` |
-| `AMULE_MAX_CONNECTIONS` | Connexions max | `300` |
-| `AMULE_MAX_SOURCES_PER_FILE` | Sources max/fichier | `200` |
+| `AMULE_MAX_CONNECTIONS` | Connexions max | `800` |
+| `AMULE_MAX_SOURCES_PER_FILE` | Sources max/fichier | `800` |
+| `AMULE_MAX_CONN_PER_5SEC` | Nouvelles connexions / 5 s | `60` |
+| `SOURCE_BOOST_AUTO_PAUSE_ENABLED` | Auto-pause des DL sans source | `false` |
 | `AMULE_DOWNLOAD_CAPACITY` | Capacité DL (Ko/s) | `300` |
 | `AMULE_UPLOAD_CAPACITY` | Capacité UL (Ko/s) | `80` |
 
@@ -132,16 +140,16 @@ docker exec amule /opt/scripts/kad-monitor.sh
 docker exec amule /opt/scripts/source-scanner.sh
 ```
 
-### Forcer un tri des fichiers
-```bash
-docker exec amule /opt/scripts/file-organizer.sh
-```
-
 ### Voir les logs
 Via le dashboard (onglet Paramètres > Logs) ou :
 ```bash
 docker exec amule cat /var/log/kad-monitor.log
 docker exec amule cat /var/log/source-scanner.log
+```
+
+### Lancer les tests du dashboard
+```bash
+python -m unittest discover -s tests
 ```
 
 ### Restaurer un backup

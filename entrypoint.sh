@@ -145,14 +145,6 @@ mod_stall_detector() {
 }
 
 # ═══════════════════════════════════════════
-# NEW: Source Hunter — aggressive source finding for Low ID
-# ═══════════════════════════════════════════
-mod_source_hunter() {
-    printf "[MOD] Source Hunter activé (toutes les 10 min)\n"
-    add_cron_job "*/10 * * * *" "source-hunter" "/opt/scripts/source-hunter.sh >> /var/log/amule-diag/source-hunter.log 2>&1"
-}
-
-# ═══════════════════════════════════════════
 # NEW: Connectivity diagnostic logger (every 3min)
 # ═══════════════════════════════════════════
 mod_connectivity_diag() {
@@ -206,6 +198,18 @@ SETTINGS_EOF
         printf "[SETTINGS] Fichier de paramètres existant\n"
     fi
     export SETTINGS_FILE
+
+    # addresses.dat drives amuled's built-in server.met auto-update (Ed2kServersUrl is only read on first run).
+    ADDRESSES_DAT="${AMULE_HOME}/addresses.dat"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.server_sources[]? | select(.enabled==true and .kind=="serverlist") | .url' "$SETTINGS_FILE" 2>/dev/null > "${ADDRESSES_DAT}.tmp" || true
+    fi
+    if [ ! -s "${ADDRESSES_DAT}.tmp" ]; then
+        printf "%s\n" "$SERVER_MET_URL" > "${ADDRESSES_DAT}.tmp"
+    fi
+    mv "${ADDRESSES_DAT}.tmp" "$ADDRESSES_DAT"
+    chown "${AMULE_UID}:${AMULE_GID}" "$ADDRESSES_DAT" 2>/dev/null || true
+    printf "[SETTINGS] addresses.dat: %s URL(s)\n" "$(grep -c . "$ADDRESSES_DAT")"
 }
 
 start_dashboard() {
@@ -383,7 +387,7 @@ AutoSortDownloads=0
 NewVersionCheck=0
 AdvancedSpamFilter=1
 MessageUseCaptchas=1
-Language=fr_FR.UTF-8
+Language=
 DateTimeFormat=%A, %x, %X
 KadNodesUrl=${KAD_NODES_DAT_URL}
 Ed2kServersUrl=${SERVER_MET_URL}
@@ -576,6 +580,9 @@ sed -i 's/^ServerKeepAliveTimeout=0/ServerKeepAliveTimeout=300/' "$AMULE_CONF" 2
 sed -i 's/^UseSrcSeeds=0/UseSrcSeeds=1/' "$AMULE_CONF" 2>/dev/null
 printf "  FileBufferSizePref=524288 ServerKeepAlive=300 UseSrcSeeds=1\n"
 
+# ── FORCE-FIX: locale not installed in the image (aMule warns at every start) ──
+sed -i 's/^Language=fr_FR.UTF-8$/Language=/' "$AMULE_CONF" 2>/dev/null
+
 # ── FORCE-FIX: Sparse files break on Docker overlay2 ──
 sed -i 's/^CreateSparseFiles=1/CreateSparseFiles=0/' "$AMULE_CONF" 2>/dev/null
 printf "  CreateSparseFiles=0 (overlay2 fix)\n"
@@ -669,21 +676,7 @@ printf "  Serverlist=%s\n" "$SRVLIST_VAL"
 ADDSRV_VAL=$(grep '^AddServerListFromServer=' "$AMULE_CONF" | head -1 | cut -d= -f2)
 printf "  AddServerListFromServer=%s\n" "$ADDSRV_VAL"
 
-# Download server.met BEFORE amuled starts — this is critical
-printf "  Téléchargement server.met...\n"
-if curl -fsSL --retry 3 --max-time 30 -o "${AMULE_HOME}/server.met.tmp" "http://upd.emule-security.org/server.met" 2>/dev/null; then
-    if [ -s "${AMULE_HOME}/server.met.tmp" ]; then
-        mv "${AMULE_HOME}/server.met.tmp" "${AMULE_HOME}/server.met"
-        chown "${AMULE_UID}:${AMULE_GID}" "${AMULE_HOME}/server.met"
-        printf "  [✓] server.met téléchargé (%s octets)\n" "$(wc -c < "${AMULE_HOME}/server.met")"
-    else
-        rm -f "${AMULE_HOME}/server.met.tmp"
-        printf "  [!] server.met vide, ignoré\n"
-    fi
-else
-    rm -f "${AMULE_HOME}/server.met.tmp"
-    printf "  [!] Échec téléchargement server.met\n"
-fi
+# server.met / nodes.dat / ipfilter are refreshed before amuled starts by mod_server_update (update-servers.sh).
 
 # Also ensure Ed2kServersUrl is set
 if ! grep -q "^Ed2kServersUrl=" "$AMULE_CONF"; then
@@ -705,7 +698,6 @@ mod_backup
 mod_kad_monitor
 mod_source_scanner
 mod_stall_detector
-mod_source_hunter
 mod_connectivity_diag
 mod_port_forward
 mod_source_boost
@@ -771,7 +763,7 @@ printf "[WATCHER] File event watcher started (PID: $!)\n"
         echo "$ED2K_LINE" | grep -qi "connected to" && ED2K_OK=1
 
         KAD_OK=0
-        echo "$KAD_LINE" | grep -qi "connected\|running\|firewalled" && KAD_OK=1
+        echo "$KAD_LINE" | grep -qi "kad: *connected" && KAD_OK=1
 
         printf "[AUTO-CONNECT] [%d/12] ED2K=%s Kad=%s\n" "$attempt" \
             "$([ $ED2K_OK -eq 1 ] && echo 'OK' || echo 'NO')" \

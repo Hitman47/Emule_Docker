@@ -40,10 +40,9 @@ fi
 STATUS=$(amulecmd_run "status")
 
 # Check Kad connection
+# amulecmd prints "Kad: Connected (ok)" / "Kad: Connected (firewalled)" / "Kad: Not connected" / "Kad: Not running"
 KAD_OK=0
-echo "$STATUS" | grep -qi "kad.*running" && KAD_OK=1
-echo "$STATUS" | grep -qi "kad.*connected" && KAD_OK=1
-echo "$STATUS" | grep -qi "kad.*firewalled" && KAD_OK=1
+echo "$STATUS" | grep -qi "kad: *connected" && KAD_OK=1
 
 if [ "$KAD_OK" -eq 1 ]; then
     printf "%s Kad est connecté, tout va bien\n" "$LOG_PREFIX"
@@ -68,7 +67,7 @@ else
     # Wait and re-check
     sleep 15
     STATUS2=$(amulecmd_run "status")
-    if echo "$STATUS2" | grep -qi "kad.*running\|kad.*connected\|kad.*firewalled"; then
+    if echo "$STATUS2" | grep -qi "kad: *connected"; then
         printf "%s Kad reconnecté avec succès !\n" "$LOG_PREFIX"
     else
         printf "%s Kad toujours déconnecté. Vérifiez les logs.\n" "$LOG_PREFIX"
@@ -76,8 +75,9 @@ else
 fi
 
 # Also check ED2K
+# "eD2k: Connected to <name> <ip> with LowID|HighID" / "eD2k: Now connecting" / "eD2k: Not connected"
 ED2K_OK=0
-echo "$STATUS" | grep -qi "ed2k.*connected" && ED2K_OK=1
+echo "$STATUS" | grep -qi "ed2k: *connected to\|ed2k: *now connecting" && ED2K_OK=1
 
 if [ "$ED2K_OK" -eq 0 ]; then
     printf "%s ED2K déconnecté, tentative de reconnexion...\n" "$LOG_PREFIX"
