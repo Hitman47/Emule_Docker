@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import ipaddress
 import secrets
+import signal
 import threading
 import html
 import atexit
@@ -3342,6 +3343,14 @@ if __name__ == "__main__":
     print(f"[DASHBOARD] Port {DASHBOARD_PORT} — en attente de connexions...")
     start_poller()
     server = DashboardServer(("0.0.0.0", DASHBOARD_PORT), Handler)
+
+    def _on_sigterm(signum, frame):
+        # The default SIGTERM disposition skips atexit, which would drop pending stats
+        print("[DASHBOARD] SIGTERM recu, arret propre...", flush=True)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

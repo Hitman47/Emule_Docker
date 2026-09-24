@@ -53,13 +53,33 @@ services:
     build: .
     container_name: amule
     network_mode: "service:gluetun"
+
+    # NOTE: depends_on n'est respecté que par `docker compose up`. Après un reboot
+    # du NAS, Docker relance les conteneurs sans ordre garanti : c'est l'entrypoint
+    # qui attend le tunnel (VPN_WAIT_TIMEOUT). Et comme le réseau d'aMule est celui
+    # de Gluetun, recréer Gluetun impose de recréer aMule :
+    #   docker compose up -d --force-recreate gluetun amule
     depends_on:
       gluetun:
         condition: service_healthy
+
+    # amuled écrit ses .met/.part.met à l'arrêt. Avec les 10s par défaut il était
+    # SIGKILL en plein écriture -> fichiers tronqués -> abort (code 134) au
+    # démarrage suivant. L'entrypoint attend AMULE_STOP_GRACE, Docker attend un
+    # peu plus longtemps.
+    stop_grace_period: 90s
+
+    # tini : reaping des zombies (cron, scripts) + transmission des signaux
+    init: true
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Europe/Paris
+
+      # Démarrage : attente du tunnel VPN avant de lancer aMule (0 = pas d'attente)
+      - VPN_WAIT_TIMEOUT=180
+      # Arrêt : secondes laissées à amuled pour sauvegarder son état
+      - AMULE_STOP_GRACE=55
 
       # Mots de passe (utilise un .env !)
       - GUI_PWD=${AMULE_GUI_PWD:-ChangeMe2025!}

@@ -48,7 +48,9 @@ EXPOSE 4711/tcp 4712/tcp 4662/tcp 4665/udp 4672/udp
 # Dashboard
 EXPOSE 8078/tcp
 
-HEALTHCHECK --interval=120s --timeout=15s --start-period=60s --retries=3 \
+# start-period genereux : apres un arret brutal aMule reverifie ses part files,
+# et l'entrypoint peut attendre jusqu'a VPN_WAIT_TIMEOUT que le tunnel monte.
+HEALTHCHECK --interval=120s --timeout=15s --start-period=300s --retries=3 \
     CMD /usr/local/bin/healthcheck.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

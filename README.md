@@ -131,6 +131,8 @@ Derrière un VPN **sans port forwarding** (NordVPN par exemple), aMule obtient u
 | `SOURCE_BOOST_AUTO_PAUSE_ENABLED` | Auto-pause des DL sans source | `false` |
 | `TRUSTED_PROXY_CIDRS` | Réseaux dont on accepte `X-Forwarded-For` (reverse proxy) | vide |
 | `DASHBOARD_VERBOSE_PARSE` | Logs détaillés des appels amulecmd | `0` |
+| `VPN_WAIT_TIMEOUT` | Attente du tunnel VPN au démarrage (s, `0` = aucune) | `180` |
+| `AMULE_STOP_GRACE` | Délai laissé à amuled pour sauvegarder à l'arrêt (s) | `55` |
 
 ### API du dashboard
 
@@ -139,6 +141,17 @@ Derrière un VPN **sans port forwarding** (NordVPN par exemple), aMule obtient u
 - Lecture : `status` et `show dl` sont exécutés par un thread de fond toutes les `refresh_interval_sec` secondes ; les requêtes HTTP lisent la mémoire (aucun `amulecmd` par requête).
 | `AMULE_DOWNLOAD_CAPACITY` | Capacité DL (Ko/s) | `300` |
 | `AMULE_UPLOAD_CAPACITY` | Capacité UL (Ko/s) | `80` |
+
+## Redémarrages / arrêts
+
+Le conteneur gère lui-même son cycle de vie, sans dépendre de `depends_on` (qui n'est **pas** respecté quand le démon Docker relance les conteneurs après un reboot du NAS) :
+
+- **À l'arrêt** : l'entrypoint intercepte SIGTERM et le transmet à `amuled`, puis attend `AMULE_STOP_GRACE` (55 s par défaut) qu'il sauvegarde ses `.met`/`.part.met`. `stop_grace_period: 90s` côté compose laisse à Docker le temps d'attendre. Sans ça, amuled était SIGKILL en pleine écriture et le démarrage suivant échouait en **code 134 (SIGABRT)**.
+- **Au démarrage** : les fichiers d'état vides (0 octet, résultat d'un arrêt brutal) sont mis de côté en `.corrupt-<date>`, et les `.part.met` tronqués sont restaurés depuis leur `.BAK`. L'entrypoint attend ensuite le tunnel VPN (`VPN_WAIT_TIMEOUT`, 180 s) avant de lancer aMule.
+- **En cas de crash** : amuled est relancé automatiquement avec un backoff (5→60 s) ; le conteneur reste actif pour que le dashboard et les logs restent accessibles, et le healthcheck passe `unhealthy`. Le code de sortie est traduit en clair dans les logs (134 = SIGABRT, 137 = OOM/kill, 139 = segfault…).
+
+> Gluetun recréé ⇒ recréer aMule aussi (son réseau est celui de Gluetun) :
+> `docker compose up -d --force-recreate gluetun amule`
 
 ## Dépannage
 

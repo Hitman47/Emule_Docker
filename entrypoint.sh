@@ -30,6 +30,160 @@ DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
 
+# ═══════════════════════════════════════════
+# Clean shutdown
+#
+# The kernel does not deliver signals with a default action to PID 1, so without
+# an explicit trap `docker stop` was a no-op here: 10s later amuled got SIGKILLed
+# mid-write, which truncated its state files and made the next start abort (134).
+# ═══════════════════════════════════════════
+AMULE_PID=""
+DASHBOARD_PID=""
+SHUTTING_DOWN=0
+STOP_GRACE=${AMULE_STOP_GRACE:-55}
+
+shutdown_handler() {
+    [ "$SHUTTING_DOWN" -eq 1 ] && return 0
+    SHUTTING_DOWN=1
+    printf "\n[SHUTDOWN] Signal reçu, arrêt propre en cours...\n"
+
+    if [ -n "$AMULE_PID" ] && kill -0 "$AMULE_PID" 2>/dev/null; then
+        printf "[SHUTDOWN] SIGTERM à amuled (PID %s), attente du flush (max %ss)...\n" "$AMULE_PID" "$STOP_GRACE"
+        kill -TERM "$AMULE_PID" 2>/dev/null || true
+        i=0
+        while kill -0 "$AMULE_PID" 2>/dev/null && [ "$i" -lt "$STOP_GRACE" ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$AMULE_PID" 2>/dev/null; then
+            printf "[SHUTDOWN] amuled ne répond pas après %ss, SIGKILL\n" "$STOP_GRACE"
+            kill -KILL "$AMULE_PID" 2>/dev/null || true
+        else
+            printf "[SHUTDOWN] amuled arrêté proprement (%ss) — état sauvegardé\n" "$i"
+        fi
+    fi
+
+    # Let the dashboard flush its stats before the container goes away
+    if [ -n "$DASHBOARD_PID" ] && kill -0 "$DASHBOARD_PID" 2>/dev/null; then
+        kill -TERM "$DASHBOARD_PID" 2>/dev/null || true
+    fi
+
+    printf "[SHUTDOWN] Terminé.\n"
+    exit 0
+}
+
+trap shutdown_handler TERM INT
+
+# ═══════════════════════════════════════════
+# Exit code explanation (amuled)
+# ═══════════════════════════════════════════
+describe_exit_code() {
+    case "$1" in
+        0)   printf "arrêt normal" ;;
+        1)   printf "erreur d'initialisation (config, instance déjà lancée ?)" ;;
+        134) printf "SIGABRT — amuled s'est auto-interrompu (fichier d'état corrompu le plus souvent)" ;;
+        137) printf "SIGKILL — tué par le noyau (OOM ?) ou stop forcé" ;;
+        139) printf "SIGSEGV — segfault" ;;
+        143) printf "SIGTERM — arrêt demandé" ;;
+        *)   printf "code inattendu" ;;
+    esac
+}
+
+# ═══════════════════════════════════════════
+# State file recovery
+#
+# An unclean kill leaves zero-byte .met/.dat files behind; aMule aborts while
+# parsing them. Quarantine them (and restore .part.met from its .BAK) so a single
+# bad shutdown cannot turn into a permanent crash loop.
+# ═══════════════════════════════════════════
+recover_state_files() {
+    RECOVERED=0
+
+    for name in server.met nodes.dat clients.met known.met known2_64.met \
+                statistics.dat preferences.dat cryptkey.dat addresses.dat \
+                shareddir.dat load_index.dat; do
+        f="${AMULE_HOME}/${name}"
+        if [ -f "$f" ] && [ ! -s "$f" ]; then
+            mv "$f" "${f}.corrupt-$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -f "$f"
+            printf "[RECOVERY] %s était vide (0 octet) — mis de côté\n" "$name"
+            RECOVERED=$((RECOVERED + 1))
+        fi
+    done
+
+    # amule.conf is critical: an empty one means no EC password, no ports, nothing.
+    if [ -f "$AMULE_CONF" ] && [ ! -s "$AMULE_CONF" ]; then
+        printf "[RECOVERY] amule.conf est vide !\n"
+        LAST_BACKUP=$(ls -1t /backups/amule-config-*.tar.gz 2>/dev/null | head -1)
+        if [ -n "$LAST_BACKUP" ]; then
+            printf "[RECOVERY] Restauration depuis %s\n" "$LAST_BACKUP"
+            tar xzf "$LAST_BACKUP" -C "$(dirname "$AMULE_HOME")" 2>/dev/null || true
+        fi
+        if [ ! -s "$AMULE_CONF" ]; then
+            rm -f "$AMULE_CONF"
+            printf "[RECOVERY] amule.conf supprimé, il sera régénéré\n"
+        fi
+        RECOVERED=$((RECOVERED + 1))
+    fi
+
+    # Part files: a truncated .part.met is recoverable from the .BAK aMule keeps
+    if [ -d "$AMULE_TEMP" ]; then
+        for met in "$AMULE_TEMP"/*.part.met; do
+            [ -e "$met" ] || continue
+            [ -s "$met" ] && continue
+            if [ -s "${met}.BAK" ]; then
+                cp -f "${met}.BAK" "$met" 2>/dev/null || true
+                printf "[RECOVERY] %s restauré depuis son .BAK\n" "$(basename "$met")"
+            else
+                mv "$met" "${met}.corrupt-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+                printf "[RECOVERY] %s vide et sans .BAK — mis de côté\n" "$(basename "$met")"
+            fi
+            RECOVERED=$((RECOVERED + 1))
+        done
+    fi
+
+    if [ "$RECOVERED" -gt 0 ]; then
+        printf "[RECOVERY] %s fichier(s) d'état réparé(s)/écarté(s)\n" "$RECOVERED"
+        chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_HOME" 2>/dev/null || true
+    fi
+}
+
+# ═══════════════════════════════════════════
+# Wait for the VPN
+#
+# `depends_on: condition: service_healthy` is only honoured by `docker compose up`.
+# After a NAS/daemon restart the containers come back in any order, so amuled can
+# start before Gluetun's tunnel is up. Wait here instead of relying on compose.
+# ═══════════════════════════════════════════
+wait_for_vpn() {
+    VPN_WAIT_TIMEOUT=${VPN_WAIT_TIMEOUT:-180}
+    [ "$VPN_WAIT_TIMEOUT" -le 0 ] 2>/dev/null && return 0
+
+    printf "[VPN] Attente du tunnel (timeout %ss)...\n" "$VPN_WAIT_TIMEOUT"
+    i=0
+    while [ "$i" -lt "$VPN_WAIT_TIMEOUT" ]; do
+        [ "$SHUTTING_DOWN" -eq 1 ] && return 0
+
+        # 1. Gluetun control server (we share its network namespace)
+        GL_STATUS=$(curl -s --max-time 2 http://127.0.0.1:9999/v1/openvpn/status 2>/dev/null)
+        if echo "$GL_STATUS" | grep -qi '"status" *: *"running"'; then
+            printf "[VPN] Tunnel Gluetun actif (%ss)\n" "$i"
+            return 0
+        fi
+
+        # 2. No control server (standalone / other VPN): probe real connectivity
+        if [ -z "$GL_STATUS" ] && curl -sf --max-time 3 -o /dev/null https://api.ipify.org 2>/dev/null; then
+            printf "[VPN] Connectivité internet OK (%ss, pas de control server Gluetun)\n" "$i"
+            return 0
+        fi
+
+        sleep 2
+        i=$((i + 2))
+    done
+
+    printf "[VPN] Timeout après %ss — démarrage quand même (aMule retentera tout seul)\n" "$VPN_WAIT_TIMEOUT"
+    return 0
+}
+
 reset_cron_file() {
     cat > "$CRON_FILE" <<'CRONEOF'
 SHELL=/bin/sh
@@ -244,6 +398,7 @@ CREDEOF
         export SOURCE_BOOST_ZERO_SRC_TIMEOUT="${SOURCE_BOOST_ZERO_SRC_TIMEOUT:-3600}"
         python3 /opt/dashboard/server.py &
         DASHBOARD_PID=$!
+        export DASHBOARD_PID
         printf "[DASHBOARD] PID: %s\n" "$DASHBOARD_PID"
     fi
 
@@ -279,6 +434,9 @@ for dir in "$AMULE_INCOMING" "$AMULE_TEMP" "$AMULE_HOME" "/backups" "/downloads"
     [ ! -d "$dir" ] && mkdir -p "$dir"
 done
 
+
+# Repair anything the previous (possibly unclean) shutdown left behind
+recover_state_files
 
 if [ -z "${GUI_PWD:-}" ]; then
     AMULE_GUI_PWD=$(pwgen -s 14)
@@ -690,6 +848,14 @@ chown -R "${AMULE_UID}:${AMULE_GID}" "$AMULE_HOME"
 chown -R "${AMULE_UID}:${AMULE_GID}" "/backups" 2>/dev/null || true
 
 reset_cron_file
+init_settings
+
+# Dashboard first: it stays reachable while we wait for the tunnel below.
+start_dashboard
+
+# Everything past this point needs the network (nodes.dat, server.met, ipfilter).
+wait_for_vpn
+
 mod_auto_restart
 mod_fix_kad_graph
 mod_fix_kad_bootstrap
@@ -701,14 +867,11 @@ mod_stall_detector
 mod_connectivity_diag
 mod_port_forward
 mod_source_boost
-init_settings
 
 if [ "$CRON_HAS_JOBS" -eq 1 ]; then
     chmod 0644 "$CRON_FILE"
     cron
 fi
-
-start_dashboard
 
 printf "\n[AMULE] Démarrage d'aMule...\n\n"
 
@@ -799,15 +962,54 @@ printf "[WATCHER] File event watcher started (PID: $!)\n"
     printf "[AUTO-CONNECT] Diagnostic initial terminé.\n"
 ) &
 
-while true; do
+# ═══════════════════════════════════════════
+# amuled supervisor
+#
+# amuled runs in the background so the shell keeps handling signals while it
+# works (`wait` is interruptible, a foreground child is not). A non-zero exit no
+# longer kills the container: we log what the code means, back off and retry, so
+# a crash-on-boot stays visible in the dashboard instead of taking it down too.
+# ═══════════════════════════════════════════
+CRASH_COUNT=0
+BACKOFF=5
+MAX_BACKOFF=60
+
+while [ "$SHUTTING_DOWN" -eq 0 ]; do
     mod_auto_share
-    gosu "${AMULE_UID}:${AMULE_GID}" amuled -c "${AMULE_HOME}" -o
-    EXIT_CODE=$?
+    recover_state_files
+
+    EXIT_CODE=0
+    gosu "${AMULE_UID}:${AMULE_GID}" amuled -c "${AMULE_HOME}" -o &
+    AMULE_PID=$!
+    wait "$AMULE_PID" || EXIT_CODE=$?
+    # A trapped signal makes `wait` return early (>128) while amuled is still alive
+    if [ "$EXIT_CODE" -gt 128 ] && kill -0 "$AMULE_PID" 2>/dev/null; then
+        EXIT_CODE=0
+        wait "$AMULE_PID" || EXIT_CODE=$?
+    fi
+    AMULE_PID=""
+
+    [ "$SHUTTING_DOWN" -eq 1 ] && break
+
     if [ "$EXIT_CODE" -eq 0 ]; then
-        printf "[MOD] Redémarrage d'aMule...\n"
+        # Normal exit = asked for it (auto-restart mod, `amulecmd shutdown`)
+        printf "[AMULE] amuled arrêté proprement, redémarrage...\n"
+        CRASH_COUNT=0
+        BACKOFF=5
+        sleep 2
     else
-        printf "[AMULE] Arrêt avec code: %d\n" "$EXIT_CODE"
-        break
+        CRASH_COUNT=$((CRASH_COUNT + 1))
+        printf "[AMULE] ✗ amuled a quitté avec le code %d (%s)\n" "$EXIT_CODE" "$(describe_exit_code "$EXIT_CODE")"
+        printf "[AMULE]   Crash #%d — nouvelle tentative dans %ss\n" "$CRASH_COUNT" "$BACKOFF"
+        if [ "$CRASH_COUNT" -ge 3 ]; then
+            printf "[AMULE]   ⚠ %d échecs consécutifs. Le conteneur reste actif pour garder le dashboard\n" "$CRASH_COUNT"
+            printf "[AMULE]     et les logs accessibles ; le healthcheck signale l'état dégradé.\n"
+        fi
+        sleep "$BACKOFF"
+        BACKOFF=$((BACKOFF * 2))
+        [ "$BACKOFF" -gt "$MAX_BACKOFF" ] && BACKOFF=$MAX_BACKOFF
     fi
 done
-exit "$EXIT_CODE"
+
+printf "[AMULE] Boucle de supervision terminée.\n"
+exit 0
