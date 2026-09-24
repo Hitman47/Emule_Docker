@@ -2453,14 +2453,44 @@ def _check_amuled_process():
         return {"ok": False, "error": str(exc)}
 
 
+def _ec_port_listening():
+    """True when something listens on the EC port, WITHOUT opening a connection.
+
+    A connect/close probe is enough to crash aMule 2.3.3 + wxWidgets 3.2 while it
+    starts up (stale fd in the epoll set -> SIGABRT). /proc/net/tcp answers the
+    same question passively. Returns None when /proc is unavailable.
+    """
+    try:
+        target = ":%04X" % int(EC_PORT)
+    except (TypeError, ValueError):
+        return None
+    seen_proc = False
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f, None)
+                seen_proc = True
+                for line in f:
+                    parts = line.split()
+                    # local_address is "HEXIP:HEXPORT", st == 0A means LISTEN
+                    if len(parts) > 3 and parts[3] == "0A" and parts[1].upper().endswith(target):
+                        return True
+        except OSError:
+            continue
+    return False if seen_proc else None
+
+
 def _check_ec_port():
+    listening = _ec_port_listening()
+    if listening is not None:
+        return {"ok": listening, "method": "proc"}
     try:
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(3)
         result = s.connect_ex(("localhost", int(EC_PORT)))
         s.close()
-        return {"ok": result == 0, "errno": result}
+        return {"ok": result == 0, "errno": result, "method": "connect"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -2542,17 +2572,9 @@ def build_debug_snapshot():
         diag["amuled_running"] = False
         diag["amuled_pid_error"] = str(e)
 
-    try:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(3)
-        result_conn = s.connect_ex(("localhost", int(EC_PORT)))
-        s.close()
-        diag["port_4712_open"] = result_conn == 0
-        diag["port_4712_errno"] = result_conn
-    except Exception as e:
-        diag["port_4712_open"] = False
-        diag["port_4712_error"] = str(e)
+    port_check = _check_ec_port()
+    diag["port_4712_open"] = bool(port_check.get("ok"))
+    diag["port_4712_method"] = port_check.get("method", "unknown")
 
     diag["ec_host"] = EC_HOST
     diag["ec_port"] = EC_PORT

@@ -90,12 +90,25 @@ if [ -z "$FWD_PORT" ]; then
 fi
 log "  VPN forwarded port: ${FWD_PORT:-NONE (= Low ID!)}"
 
-# Check if aMule ports are reachable
-for port in 4662 4672 4665; do
-    if nc -z -w2 localhost $port 2>/dev/null; then
-        log "  Port $port: OPEN"
+# Check if aMule's ports are bound — passively.
+# Never probe them with `nc -z`: a connect/close against a wxSocket that aMule
+# owns can trip the wxWidgets 3.2 epoll bug and abort the daemon (exit 134).
+# /proc tells us the same thing and touches nothing. 4672/4665 are UDP.
+port_bound() {  # $1 = port, $2 = tcp|udp
+    HEX=$(printf '%04X' "$1")
+    if [ "$2" = "udp" ]; then
+        awk -v p=":$HEX" '$2 ~ (p "$") { found = 1 } END { exit !found }'             /proc/net/udp /proc/net/udp6 2>/dev/null
     else
-        log "  Port $port: CLOSED"
+        awk -v p=":$HEX" '$4 == "0A" && $2 ~ (p "$") { found = 1 } END { exit !found }'             /proc/net/tcp /proc/net/tcp6 2>/dev/null
+    fi
+}
+
+for entry in "4662 tcp" "4672 udp" "4665 udp"; do
+    set -- $entry
+    if port_bound "$1" "$2"; then
+        log "  Port $1/$2: OPEN"
+    else
+        log "  Port $1/$2: CLOSED"
     fi
 done
 

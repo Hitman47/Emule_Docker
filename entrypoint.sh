@@ -75,13 +75,28 @@ shutdown_handler() {
 trap shutdown_handler TERM INT
 
 # ═══════════════════════════════════════════
+# Passive check: is the EC port listening?
+#
+# `nc -z` (and any connect/close probe) opens a TCP connection and drops it
+# immediately. aMule 2.3.3 + wxWidgets 3.2 crash on that while starting up:
+# the socket's fd is removed from epoll while an event is still pending
+# ("Failed to modify descriptor N in epoll descriptor M") -> SIGABRT (134).
+# Reading /proc/net/tcp tells us the same thing without touching aMule.
+# ═══════════════════════════════════════════
+ec_port_listening() {
+    PORT_HEX=$(printf '%04X' "${1:-4712}")
+    awk -v p=":$PORT_HEX" '$4 == "0A" && index($2, p) == length($2) - length(p) + 1 { found = 1 }
+         END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+# ═══════════════════════════════════════════
 # Exit code explanation (amuled)
 # ═══════════════════════════════════════════
 describe_exit_code() {
     case "$1" in
         0)   printf "arrêt normal" ;;
         1)   printf "erreur d'initialisation (config, instance déjà lancée ?)" ;;
-        134) printf "SIGABRT — amuled s'est auto-interrompu (fichier d'état corrompu le plus souvent)" ;;
+        134) printf "SIGABRT — crash interne d'aMule (bug epoll/socket de wxWidgets, ou fichier d'état corrompu)" ;;
         137) printf "SIGKILL — tué par le noyau (OOM ?) ou stop forcé" ;;
         139) printf "SIGSEGV — segfault" ;;
         143) printf "SIGTERM — arrêt demandé" ;;
@@ -899,16 +914,17 @@ printf "[WATCHER] File event watcher started (PID: $!)\n"
         echo "$OUT"
     }
 
-    # Wait for EC port
+    # Wait for the EC port WITHOUT connecting to it (see ec_port_listening)
     printf "[AUTO-CONNECT] Attente du port EC...\n"
     for i in $(seq 1 60); do
-        if nc -z localhost 4712 2>/dev/null; then
-            printf "[AUTO-CONNECT] Port EC prêt (%ds)\n" "$i"
+        if ec_port_listening 4712; then
+            printf "[AUTO-CONNECT] Port EC en écoute (%ds)\n" "$i"
             break
         fi
         sleep 1
     done
-    sleep 5
+    # Let aMule finish wiring its sockets before the first EC session
+    sleep "${EC_SETTLE_DELAY:-15}"
 
     # Import additional server lists via amulecmd
     printf "[AUTO-CONNECT] Import listes de serveurs supplementaires...\n"
