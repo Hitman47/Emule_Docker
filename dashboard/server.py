@@ -35,6 +35,8 @@ INCOMING_DIR = os.environ.get("INCOMING_DIR", "/downloads")
 TEMP_DIR = os.environ.get("TEMP_DIR", "/downloads/.amule-temp")
 
 VERBOSE_PARSE_LOG = os.environ.get("DASHBOARD_VERBOSE_PARSE", "0") in ("1", "true", "yes")
+# Grace period after the EC port opens before the poller talks to aMule
+EC_SETTLE_SECONDS = float(os.environ.get("DASHBOARD_EC_SETTLE_SECONDS", "5"))
 
 # Try to load credentials from file (more reliable than env vars)
 AMULE_HOME = os.environ.get("AMULE_HOME", "/home/amule/.aMule")
@@ -945,8 +947,10 @@ class CorePoller(threading.Thread):
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._state = {"status": None, "downloads": None, "downloads_raw": None, "updated": 0.0}
+        self._state = {"status": None, "downloads": None, "downloads_raw": None, "updated": 0.0, "core_ready": False}
         self._last_raw_dump = 0.0
+        self._ready_since = 0.0
+        self._was_ready = None
 
     def interval(self):
         try:
@@ -971,14 +975,39 @@ class CorePoller(threading.Thread):
             return False
         return time.time() - snap["updated"] <= (max_age or 3 * self.interval())
 
+    def _core_ready(self):
+        """True once amuled is running, its EC port is open and it has settled.
+
+        Connecting to the EC port while aMule is still initialising is how the
+        poller used to interfere with startup, and polling a dead core just forks
+        amulecmd for nothing (aMule logs every EC connection).
+        """
+        if not _check_amuled_process().get("ok") or not _check_ec_port().get("ok"):
+            self._ready_since = 0.0
+            return False
+        now = time.time()
+        if not self._ready_since:
+            self._ready_since = now
+            return False
+        return now - self._ready_since >= EC_SETTLE_SECONDS
+
     def _tick(self):
+        ready = self._core_ready()
+        if ready != self._was_ready:
+            self._was_ready = ready
+            _log("core ready, polling" if ready else "core not ready (amuled down or starting), polling paused")
+        if not ready:
+            with self._lock:
+                self._state["core_ready"] = False
+            return
+
         status = build_status_payload()
         dl_raw = run_amulecmd("show dl")
         downloads = build_downloads_payload(dl_raw, include_raw=True)
         now = time.time()
         with self._lock:
             prev = self._state.get("updated") or 0.0
-            self._state = {"status": status, "downloads": downloads, "downloads_raw": dl_raw, "updated": now}
+            self._state = {"status": status, "downloads": downloads, "downloads_raw": dl_raw, "updated": now, "core_ready": True}
         dt = (now - prev) if prev else 0.0
         if 0 < dt < 3600:
             try:
