@@ -1,16 +1,19 @@
 #!/bin/sh
 # ╔══════════════════════════════════════════════════════╗
 # ║  Smart Stall Detector & Auto-Reconnect               ║
+# ║  OPT-IN — off by default (STALL_DETECTOR_ENABLED)    ║
 # ║  Reads timeout from dashboard-settings.json           ║
-# ║  On stall: changes ED2K server + reconnects Kad       ║
-# ║            + refreshes nodes.dat + re-imports servers  ║
+# ║  On stall: changes ED2K server + refreshes nodes.dat  ║
 # ╚══════════════════════════════════════════════════════╝
+#
+# Why this is off by default: on a Low ID connection, "no progress for N
+# minutes" is the normal state, not a fault. Hopping servers then costs the
+# queue positions the client spent hours earning, which is worse than waiting.
+# Enable it only if downloads genuinely wedge on a High ID setup.
 
-EC_HOST="${AMULE_EC_HOST:-localhost}"
-EC_PORT="${AMULE_EC_PORT:-4712}"
-EC_PASSWORD="${AMULE_EC_PASSWORD:-}"
-EC_PASSWORD_HASH="${AMULE_EC_PASSWORD_HASH:-}"
-AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
+. /opt/scripts/lib.sh
+
+STALL_DETECTOR_ENABLED="${STALL_DETECTOR_ENABLED:-false}"
 SETTINGS_FILE="${SETTINGS_FILE:-${AMULE_HOME}/dashboard-settings.json}"
 LOG_PREFIX="[STALL-DET]"
 LOG_FILE="/var/log/amule-diag/stall-detector.log"
@@ -25,36 +28,27 @@ log() {
     printf "%s %s\n" "$LOG_PREFIX" "$1"
 }
 
+if ! is_true "$STALL_DETECTOR_ENABLED"; then
+    exit 0
+fi
+
 # ── Read configurable timeout from settings ──
-TIMEOUT_MIN=30
+# Floor at 60 min: below that we react to ordinary Low ID queueing.
+TIMEOUT_MIN=60
 if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
-    RAW_TIMEOUT=$(jq -r '.stall_timeout_minutes // 30' "$SETTINGS_FILE" 2>/dev/null)
-    if [ -n "$RAW_TIMEOUT" ] && [ "$RAW_TIMEOUT" -ge 15 ] 2>/dev/null; then
+    RAW_TIMEOUT=$(jq -r '.stall_timeout_minutes // 60' "$SETTINGS_FILE" 2>/dev/null)
+    if [ -n "$RAW_TIMEOUT" ] && [ "$RAW_TIMEOUT" -ge 60 ] 2>/dev/null; then
         TIMEOUT_MIN=$RAW_TIMEOUT
     fi
 fi
 # Convert to 5-minute intervals (cron runs every 5 min)
 STALL_THRESHOLD=$((TIMEOUT_MIN / 5))
-[ "$STALL_THRESHOLD" -lt 3 ] && STALL_THRESHOLD=3
+[ "$STALL_THRESHOLD" -lt 12 ] && STALL_THRESHOLD=12
 
-# Load credentials
-CRED_FILE="${AMULE_HOME}/.ec_credentials"
-if [ -f "$CRED_FILE" ]; then
-    . "$CRED_FILE"
-fi
-
-amulecmd_run() {
-    OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD" -c "$1" 2>&1)
-    if echo "$OUTPUT" | grep -qi "wrong password\|Authentication failed"; then
-        if [ -n "$EC_PASSWORD_HASH" ]; then
-            OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD_HASH" -c "$1" 2>&1)
-        fi
-    fi
-    echo "$OUTPUT"
-}
+amulecmd_run() { amule_ec "$1"; }
 
 # ── Check amuled is running ──
-if ! pgrep -x amuled >/dev/null 2>&1; then
+if ! amuled_running; then
     exit 0
 fi
 
@@ -124,25 +118,23 @@ if [ "$FINGERPRINT" = "$PREV_FINGERPRINT" ]; then
         CURRENT_SERVER=$(echo "$STATUS" | grep -i "ed2k.*connected" | head -1)
         log "Serveur actuel: $CURRENT_SERVER"
 
-        # Step 1: Disconnect
-        amulecmd_run "disconnect" >/dev/null 2>&1
+        # Step 1: leave the eD2k server only. A bare "disconnect" also drops
+        # Kad, which is the one network that still finds sources on Low ID.
+        amulecmd_run "disconnect ed2k" >/dev/null 2>&1
         sleep 2
 
-        # Step 2: Refresh nodes.dat
+        # Step 2: Refresh nodes.dat (stops Kad, swaps, restarts Kad)
         log "Rafraîchissement nodes.dat..."
-        if curl -fsSL --retry 2 --max-time 20 -o "${AMULE_HOME}/nodes.dat.tmp" "$KAD_NODES_URL" 2>/dev/null; then
-            if [ -s "${AMULE_HOME}/nodes.dat.tmp" ]; then
-                mv "${AMULE_HOME}/nodes.dat.tmp" "${AMULE_HOME}/nodes.dat"
-                log "nodes.dat mis à jour"
-            else
-                rm -f "${AMULE_HOME}/nodes.dat.tmp"
-            fi
+        if refresh_nodes_dat "$KAD_NODES_URL"; then
+            log "nodes.dat mis à jour"
+        else
+            log "nodes.dat non récupéré"
         fi
 
         # Step 3: Import server lists
         log "Import listes de serveurs..."
-        amulecmd_run "add ed2k://|serverlist|http://upd.emule-security.org/server.met|/" >/dev/null 2>&1
-        amulecmd_run "add ed2k://|serverlist|http://edk.peerates.net/servers/best/server.met|/" >/dev/null 2>&1
+        refresh_server_met "http://upd.emule-security.org/server.met" >/dev/null 2>&1
+        refresh_server_met "http://edk.peerates.net/servers/best/server.met" >/dev/null 2>&1
         sleep 2
 
         # Step 4: Connect to a DIFFERENT server
@@ -168,9 +160,11 @@ if [ "$FINGERPRINT" = "$PREV_FINGERPRINT" ]; then
             amulecmd_run "connect ed2k" >/dev/null 2>&1
         fi
 
-        # Step 5: Reconnect Kad
-        log "Reconnexion Kad..."
-        amulecmd_run "connect kad" >/dev/null 2>&1
+        # Step 5: make sure Kad came back up
+        if ! amulecmd_run "status" | grep -qi "kad: *connected"; then
+            log "Reconnexion Kad..."
+            amulecmd_run "connect kad" >/dev/null 2>&1
+        fi
 
         # Reset
         printf "%s\n0\n" "$FINGERPRINT" > "$STATE_FILE"

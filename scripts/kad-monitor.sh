@@ -1,87 +1,70 @@
 #!/bin/sh
 # ╔══════════════════════════════════════════╗
 # ║  Kad Health Monitor & Auto-Reconnect     ║
+# ║  + memory watchdog (replaces the blind   ║
+# ║    daily MOD_AUTO_RESTART)               ║
 # ╚══════════════════════════════════════════╝
 
-EC_HOST="${AMULE_EC_HOST:-localhost}"
-EC_PORT="${AMULE_EC_PORT:-4712}"
-EC_PASSWORD="${AMULE_EC_PASSWORD:-}"
-EC_PASSWORD_HASH="${AMULE_EC_PASSWORD_HASH:-}"
-AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
+. /opt/scripts/lib.sh
+
 LOG_PREFIX="[KAD-MON]"
-KAD_NODES_URL="http://upd.emule-security.org/nodes.dat"
-
-# Try loading credentials from file
-CRED_FILE="${AMULE_HOME}/.ec_credentials"
-if [ -f "$CRED_FILE" ]; then
-    . "$CRED_FILE"
-fi
-
-amulecmd_run() {
-    # Try plain password first, fallback to hash
-    OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD" -c "$1" 2>&1)
-    if echo "$OUTPUT" | grep -qi "wrong password\|Authentication failed"; then
-        if [ -n "$EC_PASSWORD_HASH" ]; then
-            OUTPUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD_HASH" -c "$1" 2>&1)
-        fi
-    fi
-    echo "$OUTPUT"
-}
+KAD_NODES_URL="${KAD_NODES_URL:-http://upd.emule-security.org/nodes.dat}"
+# Restart amuled when its resident memory passes this (MB). 0 disables.
+RESTART_IF_RSS_MB="${RESTART_IF_RSS_MB:-1500}"
 
 printf "%s Vérification Kad — %s\n" "$LOG_PREFIX" "$(date '+%Y-%m-%d %H:%M')"
 
-# Check aMule is running
-if ! pgrep -x amuled >/dev/null 2>&1; then
+if ! amuled_running; then
     printf "%s amuled n'est pas en cours d'exécution, skip\n" "$LOG_PREFIX"
     exit 0
 fi
 
-# Get status
-STATUS=$(amulecmd_run "status")
+# ── Memory watchdog ──
+# A fixed daily restart throws away a healthy session; restarting on actual
+# memory growth only acts when there is something to act on. The supervisor in
+# the entrypoint restarts amuled, so killing it is enough.
+if [ "$RESTART_IF_RSS_MB" -gt 0 ] 2>/dev/null; then
+    RSS_MB=$(amuled_rss_mb)
+    if [ "$RSS_MB" -gt "$RESTART_IF_RSS_MB" ]; then
+        printf "%s amuled à %s MB (> %s MB), redémarrage\n" "$LOG_PREFIX" "$RSS_MB" "$RESTART_IF_RSS_MB"
+        pkill -TERM -x amuled
+        exit 0
+    fi
+    printf "%s Mémoire amuled: %s MB (seuil %s MB)\n" "$LOG_PREFIX" "$RSS_MB" "$RESTART_IF_RSS_MB"
+fi
 
-# Check Kad connection
-# amulecmd prints "Kad: Connected (ok)" / "Kad: Connected (firewalled)" / "Kad: Not connected" / "Kad: Not running"
-KAD_OK=0
-echo "$STATUS" | grep -qi "kad: *connected" && KAD_OK=1
+STATUS=$(amule_ec "status")
 
-if [ "$KAD_OK" -eq 1 ]; then
+# ── Kad ──
+# amulecmd prints "Kad: Connected (ok)" / "Kad: Connected (firewalled)"
+#                 "Kad: Not connected" / "Kad: Not running"
+if echo "$STATUS" | grep -qi "kad: *connected"; then
     printf "%s Kad est connecté, tout va bien\n" "$LOG_PREFIX"
 else
     printf "%s Kad semble déconnecté, tentative de reconnexion...\n" "$LOG_PREFIX"
 
-    # Refresh nodes.dat
-    printf "%s Rafraîchissement de nodes.dat...\n" "$LOG_PREFIX"
-    if curl -fsSL --retry 2 --max-time 30 -o "${AMULE_HOME}/nodes.dat.tmp" "$KAD_NODES_URL"; then
-        if [ -s "${AMULE_HOME}/nodes.dat.tmp" ]; then
-            mv "${AMULE_HOME}/nodes.dat.tmp" "${AMULE_HOME}/nodes.dat"
-            printf "%s nodes.dat mis à jour\n" "$LOG_PREFIX"
-        else
-            rm -f "${AMULE_HOME}/nodes.dat.tmp"
-        fi
+    # refresh_nodes_dat stops Kad, swaps the file and starts Kad again — aMule
+    # only reads nodes.dat when Kad starts, so a plain overwrite does nothing.
+    if refresh_nodes_dat "$KAD_NODES_URL"; then
+        printf "%s nodes.dat mis à jour et Kad relancé\n" "$LOG_PREFIX"
+    else
+        printf "%s nodes.dat non récupéré, simple reconnexion\n" "$LOG_PREFIX"
+        amule_ec "connect kad" >/dev/null 2>&1
     fi
 
-    # Try to connect Kad
-    amulecmd_run "connect kad" >/dev/null 2>&1
-    printf "%s Commande connect kad envoyée\n" "$LOG_PREFIX"
-
-    # Wait and re-check
     sleep 15
-    STATUS2=$(amulecmd_run "status")
-    if echo "$STATUS2" | grep -qi "kad: *connected"; then
+    if echo "$(amule_ec "status")" | grep -qi "kad: *connected"; then
         printf "%s Kad reconnecté avec succès !\n" "$LOG_PREFIX"
     else
         printf "%s Kad toujours déconnecté. Vérifiez les logs.\n" "$LOG_PREFIX"
     fi
 fi
 
-# Also check ED2K
-# "eD2k: Connected to <name> <ip> with LowID|HighID" / "eD2k: Now connecting" / "eD2k: Not connected"
-ED2K_OK=0
-echo "$STATUS" | grep -qi "ed2k: *connected to\|ed2k: *now connecting" && ED2K_OK=1
-
-if [ "$ED2K_OK" -eq 0 ]; then
+# ── eD2k ──
+# "eD2k: Connected to <name> <ip> with LowID|HighID" / "eD2k: Now connecting"
+if ! echo "$STATUS" | grep -qi "ed2k: *connected to\|ed2k: *now connecting"; then
     printf "%s ED2K déconnecté, tentative de reconnexion...\n" "$LOG_PREFIX"
-    amulecmd_run "connect ed2k" >/dev/null 2>&1
+    amule_ec "connect ed2k" >/dev/null 2>&1
 fi
 
 printf "%s Terminé\n" "$LOG_PREFIX"

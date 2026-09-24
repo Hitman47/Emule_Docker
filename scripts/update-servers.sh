@@ -3,12 +3,23 @@
 # ║  Server & Nodes Auto-Update              ║
 # ║  Reads settings file if available        ║
 # ╚══════════════════════════════════════════╝
+#
+# Both refresh_* helpers know whether amuled is running: server.met goes in
+# through an ed2k serverlist link (merged into the live list) and nodes.dat is
+# swapped with Kad stopped. Overwriting either file under a running daemon does
+# nothing, because aMule holds them in memory and saves its own copy on exit.
 
-AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
+. /opt/scripts/lib.sh
+
 SETTINGS_FILE="${SETTINGS_FILE:-${AMULE_HOME}/dashboard-settings.json}"
 LOG_PREFIX="[SRV-UPDATE]"
 
 printf "%s Mise a jour des serveurs — %s\n" "$LOG_PREFIX" "$(date '+%Y-%m-%d %H:%M')"
+if amuled_running; then
+    printf "%s amuled tourne : import à chaud via EC\n" "$LOG_PREFIX"
+else
+    printf "%s amuled arrêté : remplacement direct des fichiers\n" "$LOG_PREFIX"
+fi
 
 # Try to read from settings file
 if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
@@ -24,41 +35,45 @@ http://edk.peerates.net/servers/best/server.met"
     IPFILTER_URL="http://upd.emule-security.org/ipfilter.zip"
 fi
 
-# Update server.met
-echo "$SERVER_URLS" | while read -r url; do
+# ── server.met ──
+# With amuled up, every URL is merged; with amuled down the first success wins,
+# since each download replaces the whole file.
+URL_FILE=$(mktemp)
+printf '%s\n' "$SERVER_URLS" > "$URL_FILE"
+while read -r url; do
     [ -z "$url" ] && continue
-    printf "%s Telechargement server.met depuis %s...\n" "$LOG_PREFIX" "$url"
-    if curl -fsSL --retry 2 --max-time 30 -o "${AMULE_HOME}/server.met.tmp" "$url"; then
-        if [ -s "${AMULE_HOME}/server.met.tmp" ]; then
-            mv "${AMULE_HOME}/server.met.tmp" "${AMULE_HOME}/server.met"
-            printf "%s server.met mis a jour\n" "$LOG_PREFIX"
-            break
-        fi
+    printf "%s server.met depuis %s...\n" "$LOG_PREFIX" "$url"
+    if refresh_server_met "$url"; then
+        printf "%s   → OK\n" "$LOG_PREFIX"
+        amuled_running || break
+    else
+        printf "%s   → Echec\n" "$LOG_PREFIX"
     fi
-    rm -f "${AMULE_HOME}/server.met.tmp"
-    printf "%s Echec pour %s\n" "$LOG_PREFIX" "$url"
-done
+done < "$URL_FILE"
 
-# Update nodes.dat
-echo "$NODES_URLS" | while read -r url; do
+# ── nodes.dat ──
+printf '%s\n' "$NODES_URLS" > "$URL_FILE"
+while read -r url; do
     [ -z "$url" ] && continue
-    printf "%s Telechargement nodes.dat depuis %s...\n" "$LOG_PREFIX" "$url"
-    if curl -fsSL --retry 2 --max-time 30 -o "${AMULE_HOME}/nodes.dat.tmp" "$url"; then
-        if [ -s "${AMULE_HOME}/nodes.dat.tmp" ]; then
-            mv "${AMULE_HOME}/nodes.dat.tmp" "${AMULE_HOME}/nodes.dat"
-            printf "%s nodes.dat mis a jour\n" "$LOG_PREFIX"
-            break
-        fi
+    printf "%s nodes.dat depuis %s...\n" "$LOG_PREFIX" "$url"
+    if refresh_nodes_dat "$url"; then
+        printf "%s   → OK\n" "$LOG_PREFIX"
+        break
     fi
-    rm -f "${AMULE_HOME}/nodes.dat.tmp"
-done
+    printf "%s   → Echec\n" "$LOG_PREFIX"
+done < "$URL_FILE"
+rm -f "$URL_FILE"
 
-# Update IP filter
+# ── IP filter ──
+# aMule reloads this one on demand, so replacing the file is safe either way.
 if [ -n "$IPFILTER_URL" ]; then
     printf "%s Telechargement IP filter...\n" "$LOG_PREFIX"
-    curl -fsSL --retry 2 --max-time 60 -o "${AMULE_HOME}/ipfilter.zip" "$IPFILTER_URL" 2>/dev/null && \
-        printf "%s IP filter mis a jour\n" "$LOG_PREFIX" || \
+    if fetch_to "$IPFILTER_URL" "${AMULE_HOME}/ipfilter.zip" 100; then
+        printf "%s IP filter mis a jour\n" "$LOG_PREFIX"
+        amuled_running && amule_ec "reload ipfilter" >/dev/null 2>&1
+    else
         printf "%s Echec IP filter\n" "$LOG_PREFIX"
+    fi
 fi
 
 printf "%s Termine\n" "$LOG_PREFIX"

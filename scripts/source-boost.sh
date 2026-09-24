@@ -3,32 +3,32 @@
 # ║  Source Boost — Low ID Download Optimizer                 ║
 # ║  Maximizes download chances without port forwarding       ║
 # ║                                                           ║
-# ║  Phase 1: Refresh stalled — pause/resume "waiting" DLs   ║
-# ║  Phase 2: Server rotation — new ED2K server = new peers   ║
-# ║  Phase 3: Kad search — trigger DHT lookup per file        ║
-# ║  Phase 4: Smart focus — pause 0-source, boost active      ║
-# ║  Phase 5: Kad health — reconnect if needed                ║
+# ║  Phase 1: Refresh stalled — pause/resume "waiting" DLs   ║  OPT-IN
+# ║  Phase 2: Server rotation — new ED2K server = new peers   ║  OPT-IN
+# ║  Phase 3: Kad search — trigger DHT lookup per file        ║  OPT-IN
+# ║  Phase 4: Smart focus — pause 0-source, boost active      ║  OPT-IN
+# ║  Phase 5: Kad health — reconnect if needed                ║  always
 # ╚══════════════════════════════════════════════════════════╝
+#
+# Phases 1-4 are off by default. Each of them throws away state that eD2k takes
+# hours to build: pause/resume drops the client's place in every remote queue,
+# rotating servers drops it again and re-announces every shared file, and a Kad
+# keyword search is not how you find sources for a file whose hash you already
+# have (that is what "getting sources" does). On a Low ID connection they
+# consistently cost more than they gain. Phase 5 only reconnects Kad.
 
-EC_HOST="${AMULE_EC_HOST:-localhost}"
-EC_PORT="${AMULE_EC_PORT:-4712}"
-EC_PASSWORD="${AMULE_EC_PASSWORD:-}"
-EC_PASSWORD_HASH="${AMULE_EC_PASSWORD_HASH:-}"
-AMULE_HOME="${AMULE_HOME:-/home/amule/.aMule}"
+. /opt/scripts/lib.sh
+
 LOG_PREFIX="[SRC-BOOST]"
 LOG_FILE="/var/log/amule-diag/source-boost.log"
 STATE_DIR="${AMULE_HOME}/.source-boost"
+SOURCE_BOOST_CYCLE_ENABLED="${SOURCE_BOOST_CYCLE_ENABLED:-false}"
+SOURCE_BOOST_ROTATION_ENABLED="${SOURCE_BOOST_ROTATION_ENABLED:-false}"
+SOURCE_BOOST_KAD_SEARCH_ENABLED="${SOURCE_BOOST_KAD_SEARCH_ENABLED:-false}"
 SOURCE_BOOST_AUTO_PAUSE_ENABLED="${SOURCE_BOOST_AUTO_PAUSE_ENABLED:-false}"
 SOURCE_BOOST_ZERO_SRC_TIMEOUT="${SOURCE_BOOST_ZERO_SRC_TIMEOUT:-3600}"
 
 mkdir -p /var/log/amule-diag "$STATE_DIR"
-
-is_true() {
-    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-        1|true|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 log() {
     MSG="$(date '+%Y-%m-%d %H:%M:%S') $LOG_PREFIX $1"
@@ -36,20 +36,9 @@ log() {
     printf "%s\n" "$MSG"
 }
 
-# Load credentials
-CRED_FILE="${AMULE_HOME}/.ec_credentials"
-[ -f "$CRED_FILE" ] && . "$CRED_FILE"
+amule_cmd() { amule_ec "$1"; }
 
-amule_cmd() {
-    OUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD" -c "$1" 2>&1)
-    if echo "$OUT" | grep -qi "wrong password\|Authentication failed"; then
-        [ -n "$EC_PASSWORD_HASH" ] && OUT=$(amulecmd -h "$EC_HOST" -p "$EC_PORT" -P "$EC_PASSWORD_HASH" -c "$1" 2>&1)
-    fi
-    echo "$OUT"
-}
-
-# Check amuled
-pgrep -x amuled >/dev/null 2>&1 || { log "amuled not running, skip"; exit 0; }
+amuled_running || { log "amuled not running, skip"; exit 0; }
 
 log "=== Source Boost START ==="
 
@@ -62,7 +51,13 @@ PARSE_FILE=$(mktemp)
 CURRENT_HASH=""
 CURRENT_NAME=""
 
-echo "$DL_RAW" | while IFS= read -r line; do
+# NOTE: read from a file, not from a pipe. A piped `while` runs in a subshell,
+# so CURRENT_HASH never reached the flush below and the LAST download in the
+# list was silently dropped from every phase.
+RAW_FILE=$(mktemp)
+printf '%s\n' "$DL_RAW" > "$RAW_FILE"
+
+while IFS= read -r line; do
     STRIPPED=$(echo "$line" | sed 's/^[> ]*//')
     # Hash line: 32 hex + filename
     HASH=$(echo "$STRIPPED" | grep -oE '^[0-9A-Fa-f]{32}')
@@ -102,7 +97,8 @@ echo "$DL_RAW" | while IFS= read -r line; do
         *complet*) CURRENT_STATUS="complete" ;;
         *error*|*failed*) CURRENT_STATUS="error" ;;
     esac
-done
+done < "$RAW_FILE"
+rm -f "$RAW_FILE"
 # Flush last
 if [ -n "$CURRENT_HASH" ]; then
     echo "${CURRENT_HASH}|${CURRENT_NAME}|${CURRENT_PCT}|${CURRENT_SRC}|${CURRENT_STATUS}" >> "$PARSE_FILE"
@@ -155,7 +151,10 @@ else
     [ $((NOW - LAST_CYCLE)) -gt $CYCLE_INTERVAL ] && DO_CYCLE=1
 fi
 
-if [ "$DO_CYCLE" -eq 1 ] && [ "$STALLED_COUNT" -gt 0 ]; then
+if ! is_true "$SOURCE_BOOST_CYCLE_ENABLED"; then
+    DO_CYCLE=0
+    log "Phase 1: désactivée (SOURCE_BOOST_CYCLE_ENABLED=$SOURCE_BOOST_CYCLE_ENABLED)"
+elif [ "$DO_CYCLE" -eq 1 ] && [ "$STALLED_COUNT" -gt 0 ]; then
     log "Phase 1: Pause/Resume cycle on $STALLED_COUNT stalled download(s)..."
     CYCLED=0
     while IFS='|' read -r hash name pct src status; do
@@ -200,7 +199,10 @@ else
     [ $((NOW - LAST_ROT)) -gt $ROTATION_INTERVAL ] && DO_ROTATION=1
 fi
 
-if [ "$DO_ROTATION" -eq 1 ]; then
+if ! is_true "$SOURCE_BOOST_ROTATION_ENABLED"; then
+    DO_ROTATION=0
+    log "Phase 2: désactivée (SOURCE_BOOST_ROTATION_ENABLED=$SOURCE_BOOST_ROTATION_ENABLED)"
+elif [ "$DO_ROTATION" -eq 1 ]; then
     log "Phase 2: Server rotation..."
     SERVERS_RAW=$(amule_cmd "show servers")
     CURRENT_ADDR=$(echo "$STATUS_RAW" | grep -i "ed2k.*connected" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+' | head -1)
@@ -270,7 +272,10 @@ else
     [ $((NOW - LAST_KAD)) -gt $KAD_INTERVAL ] && DO_KAD=1
 fi
 
-if [ "$DO_KAD" -eq 1 ] && [ $((STALLED_COUNT + ZERO_SRC_COUNT)) -gt 0 ]; then
+if ! is_true "$SOURCE_BOOST_KAD_SEARCH_ENABLED"; then
+    DO_KAD=0
+    log "Phase 3: désactivée (SOURCE_BOOST_KAD_SEARCH_ENABLED=$SOURCE_BOOST_KAD_SEARCH_ENABLED)"
+elif [ "$DO_KAD" -eq 1 ] && [ $((STALLED_COUNT + ZERO_SRC_COUNT)) -gt 0 ]; then
     log "Phase 3: Kad source search for stalled downloads..."
     SEARCHED=0
     while IFS='|' read -r hash name pct src status; do
@@ -382,6 +387,12 @@ cat > "${STATE_DIR}/last-run.json" << STATUSEOF
   "active": $ACTIVE_COUNT,
   "stalled": $STALLED_COUNT,
   "zero_sources": $ZERO_SRC_COUNT,
+  "enabled": {
+    "cycle": $(is_true "$SOURCE_BOOST_CYCLE_ENABLED" && echo true || echo false),
+    "rotation": $(is_true "$SOURCE_BOOST_ROTATION_ENABLED" && echo true || echo false),
+    "kad_search": $(is_true "$SOURCE_BOOST_KAD_SEARCH_ENABLED" && echo true || echo false),
+    "auto_pause": $(is_true "$SOURCE_BOOST_AUTO_PAUSE_ENABLED" && echo true || echo false)
+  },
   "actions": {
     "cycle_done": $DO_CYCLE,
     "rotation_done": $DO_ROTATION,

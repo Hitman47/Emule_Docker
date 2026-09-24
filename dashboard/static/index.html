@@ -298,7 +298,7 @@ body.ed2k-drop::after{content:'Déposer les liens ed2k ici';position:fixed;inset
       <button class="btn btn-ghost btn-sm" onclick="loadDownloads(true)">🔄 Rafraîchir</button>
       <button class="btn btn-green btn-sm" onclick="handleBulkTransferAction('resume', this)" data-requires-write="1">▶ Tout reprendre</button>
       <button class="btn btn-ghost btn-sm" onclick="handleBulkTransferAction('pause', this)" data-requires-write="1">⏸ Tout pauser</button>
-      <button class="btn btn-ghost btn-sm" onclick="triggerSourceBoost(this)" data-requires-write="1" title="Relance la recherche de sources, rotation serveur, cycle pause/resume">🚀 Boost sources</button>
+      <button class="btn btn-ghost btn-sm" onclick="triggerSourceBoost(this)" data-requires-write="1" title="Manuel uniquement : rotation de serveur, cycle pause/resume et recherche Kad. Ces actions font perdre les places acquises dans les files d'attente distantes — à n'utiliser que si les téléchargements sont vraiment bloqués.">🚀 Boost sources</button>
       <span id="boostStatus" style="font-size:.72em;color:var(--text3)"></span>
       <span style="font-size:.75em;color:var(--text3);margin-left:auto" id="dlRefreshInfo">MAJ auto toutes les 5s</span>
     </div>
@@ -514,19 +514,22 @@ body.ed2k-drop::after{content:'Déposer les liens ed2k ici';position:fixed;inset
       <p style="color:var(--text2);font-size:.85em;line-height:1.5;margin-bottom:12px">
         Si aucun téléchargement ne progresse pendant le délai configuré, le système change automatiquement de serveur ED2K et relance la recherche de sources Kad.
       </p>
+      <p style="color:var(--warn,#e0a020);font-size:.82em;line-height:1.5;margin-bottom:12px;border-left:3px solid var(--warn,#e0a020);padding-left:10px">
+        Désactivé par défaut (<code>STALL_DETECTOR_ENABLED=false</code>). En Low ID, « aucun progrès depuis N minutes » est l'état normal : changer de serveur fait perdre les places acquises dans les files d'attente, ce qui ralentit davantage. À activer seulement avec un High ID.
+      </p>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">
         <label style="font-size:.85em;color:var(--text2);white-space:nowrap">Délai sans progrès :</label>
         <select id="stallTimeoutMinutes" onchange="saveStallTimeout()" style="padding:8px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none;min-width:140px">
-          <option value="15">15 minutes</option>
-          <option value="20">20 minutes</option>
-          <option value="30" selected>30 minutes</option>
-          <option value="45">45 minutes</option>
-          <option value="60">1 heure</option>
+          <option value="60" selected>1 heure</option>
+          <option value="90">1 h 30</option>
+          <option value="120">2 heures</option>
+          <option value="180">3 heures</option>
+          <option value="240">4 heures</option>
         </select>
         <button class="btn btn-ghost btn-sm" onclick="forceReconnectNow()">⚡ Forcer maintenant</button>
       </div>
       <div id="stallSettingsMsg" class="msg"></div>
-      <p style="font-size:.78em;color:var(--text3);margin-top:6px">Le stall-detector vérifie toutes les 5 min. Après le délai choisi, il change de serveur et relance Kad.</p>
+      <p style="font-size:.78em;color:var(--text3);margin-top:6px">Le stall-detector vérifie toutes les 5 min. Après le délai choisi, il quitte le serveur eD2k (Kad reste connecté), rafraîchit nodes.dat et se reconnecte ailleurs.</p>
     </div>
 
     <!-- Server Sources Management -->
@@ -1505,10 +1508,13 @@ async function handleBulkTransferAction(action, btn = null) {
 
 // ── Source Boost ──
 async function triggerSourceBoost(btn) {
+  // Off the clock, on demand only: these phases reset the client's place in
+  // every remote queue, so they must stay a deliberate act.
+  if (!confirm("Le Boost change de serveur eD2k, relance une recherche Kad et fait un cycle pause/resume.\n\nCela fait perdre les places acquises dans les files d'attente distantes. À n'utiliser que si les téléchargements sont réellement bloqués.\n\nContinuer ?")) return;
   if (btn) { btn.disabled = true; btn.textContent = '🚀 Boost en cours...'; }
   const d = await apiPost('/api/source_boost');
   if (d?.ok) {
-    showToast('ok', 'Source Boost lancé — rotation serveur, recherche Kad, refresh sources');
+    showToast('ok', 'Source Boost lancé — rotation serveur, recherche Kad, cycle pause/resume');
   } else {
     showToast('err', 'Erreur lors du boost');
   }
@@ -2115,7 +2121,7 @@ async function kadReconnect() {
 
 // ── Stall Timeout Settings ──
 async function saveStallTimeout() {
-  const minutes = parseInt(document.getElementById('stallTimeoutMinutes').value) || 30;
+  const minutes = parseInt(document.getElementById('stallTimeoutMinutes').value) || 60;
   const d = await api('/api/settings');
   if (!d?.settings) return;
   d.settings.stall_timeout_minutes = minutes;

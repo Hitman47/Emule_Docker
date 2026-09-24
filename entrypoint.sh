@@ -23,9 +23,12 @@ CRON_FILE="/etc/cron.d/amule"
 CRON_HAS_JOBS=0
 
 # ── Performance tuning (Low ID optimized) ──
-MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-800}
-MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-800}
-MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-60}
+# Defaults sized for a Low ID peer behind a VPN: most outbound connections
+# never complete, so a high cap just fills the table with half-open sockets and
+# starves the ones that would have worked. Raise them after getting a High ID.
+MAX_CONNECTIONS=${AMULE_MAX_CONNECTIONS:-500}
+MAX_SOURCES=${AMULE_MAX_SOURCES_PER_FILE:-500}
+MAX_CONN_5SEC=${AMULE_MAX_CONN_PER_5SEC:-30}
 DL_CAPACITY=${AMULE_DOWNLOAD_CAPACITY:-300}
 UL_CAPACITY=${AMULE_UPLOAD_CAPACITY:-80}
 SLOT_ALLOC=${AMULE_SLOT_ALLOCATION:-20}
@@ -215,10 +218,14 @@ add_cron_job() {
 }
 
 mod_auto_restart() {
+    # Superseded by RESTART_IF_RSS_MB in kad-monitor.sh, which restarts on
+    # actual memory growth instead of on the clock. A timed restart throws away
+    # a healthy session — every queue position, every connected source.
     MOD_AUTO_RESTART_ENABLED=${MOD_AUTO_RESTART_ENABLED:-"false"}
     MOD_AUTO_RESTART_CRON=${MOD_AUTO_RESTART_CRON:-"0 6 * * *"}
     if [ "$MOD_AUTO_RESTART_ENABLED" = "true" ]; then
-        printf "[MOD] Auto-restart activé (cron: %s)\n" "$MOD_AUTO_RESTART_CRON"
+        printf "[MOD] Auto-restart horaire activé (cron: %s)\n" "$MOD_AUTO_RESTART_CRON"
+        printf "[MOD]   ⓘ RESTART_IF_RSS_MB (surveillance mémoire) est préférable.\n"
         add_cron_job "$MOD_AUTO_RESTART_CRON" "MOD_AUTO_RESTART" "/bin/sh -c 'echo \"[MOD] Redémarrage aMule...\" && pkill -x amuled || true'"
     fi
 }
@@ -309,6 +316,12 @@ mod_source_scanner() {
 # NEW: Stall detector — changes server if no DL progress for 30min
 # ═══════════════════════════════════════════
 mod_stall_detector() {
+    # Off by default: on Low ID, "no progress" is the normal state and hopping
+    # servers costs more queue position than it recovers.
+    case "$(printf '%s' "${STALL_DETECTOR_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) ;;
+        *) printf "[MOD] Stall detector désactivé (STALL_DETECTOR_ENABLED=false)\n"; return ;;
+    esac
     printf "[MOD] Stall detector activé (toutes les 5 min)\n"
     add_cron_job "*/5 * * * *" "stall-detector" "/opt/scripts/stall-detector.sh >> /var/log/amule-diag/stall-detector.log 2>&1"
 }
@@ -334,7 +347,7 @@ mod_port_forward() {
 # NEW: Source Boost — Low ID download optimizer
 # ═══════════════════════════════════════════
 mod_source_boost() {
-    printf "[MOD] Source Boost activé (toutes les 10 min)\n"
+    printf "[MOD] Source Boost activé (toutes les 10 min) — phases 1-4 opt-in, phase 5 (santé Kad) active\n"
     add_cron_job "*/10 * * * *" "source-boost" "/opt/scripts/source-boost.sh 2>&1"
 }
 
@@ -426,6 +439,15 @@ CREDEOF
         printf 'AMULE_HOME=%s\n' "${AMULE_HOME}"
         printf 'INCOMING_DIR=%s\n' "${AMULE_INCOMING}"
         printf 'SETTINGS_FILE=%s\n' "${AMULE_HOME}/dashboard-settings.json"
+        # cron gets a bare environment, so anything the maintenance scripts read
+        # has to be written here or their defaults silently win.
+        printf 'STALL_DETECTOR_ENABLED=%s\n' "${STALL_DETECTOR_ENABLED:-false}"
+        printf 'SOURCE_BOOST_CYCLE_ENABLED=%s\n' "${SOURCE_BOOST_CYCLE_ENABLED:-false}"
+        printf 'SOURCE_BOOST_ROTATION_ENABLED=%s\n' "${SOURCE_BOOST_ROTATION_ENABLED:-false}"
+        printf 'SOURCE_BOOST_KAD_SEARCH_ENABLED=%s\n' "${SOURCE_BOOST_KAD_SEARCH_ENABLED:-false}"
+        printf 'SOURCE_BOOST_AUTO_PAUSE_ENABLED=%s\n' "${SOURCE_BOOST_AUTO_PAUSE_ENABLED:-false}"
+        printf 'SOURCE_BOOST_ZERO_SRC_TIMEOUT=%s\n' "${SOURCE_BOOST_ZERO_SRC_TIMEOUT:-3600}"
+        printf 'RESTART_IF_RSS_MB=%s\n' "${RESTART_IF_RSS_MB:-1500}"
     } > /etc/environment
 }
 

@@ -115,7 +115,7 @@ def _default_settings():
     return {
         "server_sources": [dict(v) for v in DEFAULT_SERVER_SOURCES.values()],
         "last_scan": None,
-        "stall_timeout_minutes": 30,
+        "stall_timeout_minutes": 60,
         "dashboard": dict(DEFAULT_DASHBOARD_CONFIG),
     }
 
@@ -153,12 +153,13 @@ def normalize_settings(raw=None):
     if isinstance(sources, list) and sources:
         settings["server_sources"] = sources
     settings["dashboard"] = normalize_dashboard_config(raw.get("dashboard"))
-    # Stall timeout (15-60 min)
+    # Stall timeout (60-240 min). Below an hour we would be reacting to
+    # ordinary Low ID queueing, and "reacting" costs every queue position.
     try:
-        stall = int(raw.get("stall_timeout_minutes", 30))
-        settings["stall_timeout_minutes"] = max(15, min(60, stall))
+        stall = int(raw.get("stall_timeout_minutes", 60))
+        settings["stall_timeout_minutes"] = max(60, min(240, stall))
     except Exception:
-        settings["stall_timeout_minutes"] = 30
+        settings["stall_timeout_minutes"] = 60
     return settings
 
 
@@ -3141,10 +3142,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     last_run = json.load(_f)
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
-            # Trigger boost in background
+            # Trigger boost in background.
+            # Phases 1-3 are disabled for the cron job because they cost queue
+            # positions every ten minutes for no gain. A click is a deliberate
+            # "try everything now", so the manual run enables them.
             def do_boost():
+                env = dict(os.environ)
+                env["SOURCE_BOOST_CYCLE_ENABLED"] = "true"
+                env["SOURCE_BOOST_ROTATION_ENABLED"] = "true"
+                env["SOURCE_BOOST_KAD_SEARCH_ENABLED"] = "true"
                 try:
-                    subprocess.run(["/opt/scripts/source-boost.sh"], capture_output=True, timeout=180)
+                    subprocess.run(["/opt/scripts/source-boost.sh"], capture_output=True, timeout=180, env=env)
                 except Exception:
                     pass
                 cache_clear("status", "downloads", "clients")

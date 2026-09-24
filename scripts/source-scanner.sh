@@ -56,13 +56,12 @@ echo "$SOURCES" | while IFS='|' read -r kind url key; do
     printf "%s [%s] %s — %s\n" "$LOG_PREFIX" "$kind" "$key" "$url"
 
     if [ "$kind" = "serverlist" ]; then
-        # Import .met file via ed2k link
-        LINK="ed2k://|serverlist|${url}|/"
-        OUTPUT=$(amulecmd_run "add $LINK")
-        if ! echo "$OUTPUT" | grep -qi "error"; then
+        # refresh_server_met merges into the live list when amuled runs, and
+        # only replaces server.met when it does not.
+        if refresh_server_met "$url"; then
             printf "%s   → Importé avec succès\n" "$LOG_PREFIX"
         else
-            printf "%s   → Échec: %s\n" "$LOG_PREFIX" "$OUTPUT"
+            printf "%s   → Échec\n" "$LOG_PREFIX"
         fi
 
     elif [ "$kind" = "html" ]; then
@@ -89,32 +88,37 @@ done
 # Also update nodes.dat for Kad
 NODES_URLS=$(jq -r '.nodes_sources[] | select(.enabled==true) | .url' "$SETTINGS_FILE" 2>/dev/null)
 if [ -n "$NODES_URLS" ]; then
-    echo "$NODES_URLS" | while read -r nurl; do
+    NURL_FILE=$(mktemp)
+    printf '%s\n' "$NODES_URLS" > "$NURL_FILE"
+    while read -r nurl; do
         [ -z "$nurl" ] && continue
         printf "%s Mise à jour nodes.dat depuis %s\n" "$LOG_PREFIX" "$nurl"
-        if curl -fsSL --retry 2 --max-time 30 -o "${AMULE_HOME}/nodes.dat.tmp" "$nurl"; then
-            if [ -s "${AMULE_HOME}/nodes.dat.tmp" ]; then
-                mv "${AMULE_HOME}/nodes.dat.tmp" "${AMULE_HOME}/nodes.dat"
-                printf "%s   → nodes.dat mis à jour\n" "$LOG_PREFIX"
-                break
-            fi
+        if refresh_nodes_dat "$nurl"; then
+            printf "%s   → nodes.dat mis à jour\n" "$LOG_PREFIX"
+            break
         fi
-        rm -f "${AMULE_HOME}/nodes.dat.tmp"
-    done
+    done < "$NURL_FILE"
+    rm -f "$NURL_FILE"
 fi
 
 # Update IP filter
 IPFILTER_URL=$(jq -r '.ipfilter_url // empty' "$SETTINGS_FILE" 2>/dev/null)
 if [ -n "$IPFILTER_URL" ]; then
     printf "%s Mise à jour IP filter...\n" "$LOG_PREFIX"
-    curl -fsSL --retry 2 --max-time 60 -o "${AMULE_HOME}/ipfilter.zip" "$IPFILTER_URL" 2>/dev/null && \
-        printf "%s   → IP filter mis à jour\n" "$LOG_PREFIX" || \
+    if fetch_to "$IPFILTER_URL" "${AMULE_HOME}/ipfilter.zip" 100; then
+        printf "%s   → IP filter mis à jour\n" "$LOG_PREFIX"
+        amule_ec "reload ipfilter" >/dev/null 2>&1
+    else
         printf "%s   → Échec IP filter\n" "$LOG_PREFIX"
+    fi
 fi
 
-# Reconnect ED2K after importing
-printf "%s Reconnexion ED2K...\n" "$LOG_PREFIX"
-amulecmd_run "connect ed2k" >/dev/null 2>&1
+# Only reconnect when actually disconnected: re-establishing an eD2k session
+# costs the queue positions the client spent hours earning.
+if ! amulecmd_run "status" | grep -qi "ed2k: *connected to\|ed2k: *now connecting"; then
+    printf "%s ED2K déconnecté, reconnexion...\n" "$LOG_PREFIX"
+    amulecmd_run "connect ed2k" >/dev/null 2>&1
+fi
 
 # Update last_scan timestamp in settings
 TMPFILE=$(mktemp)
